@@ -1,0 +1,20 @@
+embedding:
+  model: intfloat/e5-large-instruct
+  dim: 1024
+  dtype: fp16
+  batch_size: 32
+  timeout_s: 5
+
+llm:
+  model: deepseek-chat
+  temperature: 0.1
+  max_tokens: 512
+
+reranker:
+  model: xlm-roberta-large
+
+cache:
+  embedding_ttl_seconds: 86400    # 24h
+  search_ttl_seconds: 3600        # 1h
+  answer_ttl_seconds: 1800        # 30m
+

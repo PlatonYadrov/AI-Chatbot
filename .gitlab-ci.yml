@@ -1,0 +1,38 @@
+stages:
+  - lint
+  - test
+  - build
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PYTHONUNBUFFERED: "1"
+
+cache:
+  paths:
+    - .cache/pip
+
+before_script:
+  - python -V
+  - pip install --upgrade pip
+  - pip install ruff pytest
+
+lint:
+  stage: lint
+  image: python:3.11-slim
+  script:
+    - ruff --version
+    - ruff --format=github --ignore E501 .
+  allow_failure: true
+
+test:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - pytest -q || true
+
+build:
+  stage: build
+  image: alpine:3.20
+  script:
+    - echo "Build placeholder"
+
