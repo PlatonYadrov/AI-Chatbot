@@ -1,0 +1,5 @@
+cluster:
+  enabled: true
+  peer_id: node-1
+  grpc_port: 6334
+  http_port: 6333
