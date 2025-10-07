@@ -1,0 +1,8 @@
+version: '3.9'
+services:
+  ingestion:
+    build: ./services/ingestion
+  online_rag:
+    build: ./services/online-rag
+  admin_portal:
+    build: ./services/admin-portal

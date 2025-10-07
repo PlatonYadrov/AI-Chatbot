@@ -1,0 +1,6 @@
+embedding:
+  model_name: e5-large-instruct
+  dimensionality: 1024
+llm:
+  model_name: deepseek-chat
+  max_tokens: 512
