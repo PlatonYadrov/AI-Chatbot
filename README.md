@@ -60,7 +60,7 @@ Client
 - `LLM_MODEL_NAME=cognitivecomputations/Qwen3-30B-A3B-AWQ`
 
 ### Запуск
-1) Установите NVIDIA runtime (для vLLM/TEI) и при необходимости добавьте `gpus` к сервисам `llm` и `embeddings`.
+1) Установите NVIDIA runtime (для vLLM/TEI) и при необходимости добавим `gpus` к сервисам `llm` и `embeddings`.
 2) Поднимите стек:
 ```bash
 docker compose up -d qdrant llm embeddings ocr ingestion online_rag
@@ -75,18 +75,4 @@ curl -X POST http://localhost:7000/query -H "Content-Type: application/json" -d 
 ```
 
 ### Выбор моделей и размерности
-- По умолчанию TEI использует `intfloat/e5-base` (768). Для `BAAI/bge-m3` (1024) замените `--model-id` в compose и пересоздайте коллекцию Qdrant.
-
-### Когда подключать брокер сообщений
-- Текущий контур онлайн‑запросов синхронный (HTTP) ради низкой задержки.
-- Для массового ingestion/инкрементов используйте Kafka/Redpanda/NATS/Redis Streams: топики `raw_docs → parsed_docs → ready_for_embedding → embeddings → index_updates`, DLQ, реплей.
-
-## Дополнительные материалы
-- Практическое пошаговое руководство по построению рабочей RAG-системы с примерами кода и
-  рекомендациями по обработке DOCX/PDF/XLSX/PPTX/SCRAM доступно в `docs/practical_guide.md`.
-
-## С чего начать разработку
-- **Первым делом — ingestion.** Реализуйте один end-to-end путь (например, Confluence → Kafka → Qdrant), чтобы сформировать контракт обмена сообщениями (`raw_docs`, `parsed_docs`, `ready_for_embedding`, `embeddings`) и проверить схемы из `shared/models.py`.
-- **Фокус на передачу данных между микросервисами.** Настройте публикацию/подписку в Kafka, убедитесь, что процессоры передают `ChunkReady` в эмбеддер, а индексатор подтверждает апдейты через Redis Pub/Sub (`index_updated`).
-- **Далее — минимальный online RAG.** После появления данных в Qdrant поднимите `gateway` + `query_embedder` + `dense_search` + `llm_service`, чтобы ответить на базовые запросы и проверить фильтры ACL.
-- **Затем развивайте сервисы.** Добавляйте hybrid-поиск, reranker, guardrails, подключайте дополнительные коннекторы и наращивайте админку.
+- По умолчанию TEI использует `intfloat/e5-base` (768). Для `BAAI/bge-m3` (1024) заменим `--model-id` в compose и пересоздадим коллекцию Qdrant.
