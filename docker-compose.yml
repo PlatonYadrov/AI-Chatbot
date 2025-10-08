@@ -2,7 +2,81 @@ version: '3.9'
 services:
   ingestion:
     build: ./services/ingestion
+    env_file:
+      - ./configs/dev.env
+    ports:
+      - "6000:6000"
+    volumes:
+      - rag_data:/data
+    depends_on:
+      - embeddings
+      - ocr
   online_rag:
     build: ./services/online-rag
+    env_file:
+      - ./configs/dev.env
+    ports:
+      - "7000:7000"
+    volumes:
+      - rag_data:/data
+    depends_on:
+      - llm
+      - qdrant
   admin_portal:
     build: ./services/admin-portal
+  ocr:
+    build: ./services/ocr
+    ports:
+      - "9000:9000"
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+  llm:
+    image: vllm/vllm-openai:v0.10.0
+    environment:
+      - VLLM_USE_V1=0
+    command: >-
+      --model cognitivecomputations/Qwen3-30B-A3B-AWQ
+      --max-model-len 8000
+      --dtype half
+      --gpu-memory-utilization 0.90
+      --disable-log-requests
+      --no-enable-prefix-caching
+      --tensor-parallel-size 2
+    ports:
+      - "8000:8000"
+    shm_size: 32g
+    ipc: host
+    volumes:
+      - hf_cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cuda-12.1
+    command: >-
+      --model-id intfloat/e5-base
+      --dtype float16
+    ports:
+      - "8080:80"
+    volumes:
+      - hf_cache:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf_cache:
+  rag_data:
+  qdrant_storage:

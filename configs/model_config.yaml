@@ -1,6 +1,14 @@
 embedding:
-  model_name: e5-large-instruct
-  dimensionality: 1024
+  model_name: intfloat/e5-base
+  dimensionality: 768
+
 llm:
-  model_name: deepseek-chat
+  model_name: cognitivecomputations/Qwen3-30B-A3B-AWQ
   max_tokens: 512
+
+chunking:
+  strategy: token_aware  # Options: token_aware, recursive, semantic
+  chunk_size_tokens: 300
+  overlap_tokens: 75
+  min_chunk_tokens: 50
+  max_chunk_tokens: 512
