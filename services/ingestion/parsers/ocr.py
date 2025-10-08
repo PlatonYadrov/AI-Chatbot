@@ -1,49 +1,13 @@
 from __future__ import annotations
 
-import io
-from typing import Optional
-
-from .base import RawBlock
-
-
-class OcrEngine:
-    def __init__(self, endpoint: str | None = None, lang: str = "eng") -> None:
-        import os
-        self.endpoint = endpoint or os.getenv("OCR_URL", "http://ocr:9000/ocr")
-        self.lang = lang
-
-    def is_available(self) -> bool:
-        return bool(self.endpoint)
-
-    def extract_text(self, image_bytes: bytes) -> str:
-        import requests
-        files = {"file": ("image.png", io.BytesIO(image_bytes), "application/octet-stream")}
-        resp = requests.post(self.endpoint, files=files, timeout=60)
-        resp.raise_for_status()
-        return resp.json().get("text", "")
-
-
-def merge_ocr_text(original: str, *, ocr_text: str) -> str:
-    original = (original or "").strip()
-    ocr_text = (ocr_text or "").strip()
-    if not original:
-        return ocr_text
-    if not ocr_text:
-        return original
-    if ocr_text in original:
-        return original
-    return original + "\n" + ocr_text
-
 """OCR utilities shared by the rich document parsers.
 
 The practical guides that ship with the repository already describe how OCR
-extracted text should be merged back into the surrounding logical blocks.  This
+extracted text should be merged back into the surrounding logical blocks. This
 module turns those snippets into reusable code so that parsers can opt in to
 image processing without duplicating helpers or forcing hard dependencies on
 Pillow/pytesseract in environments where they are not installed.
 """
-
-from __future__ import annotations
 
 import hashlib
 import io

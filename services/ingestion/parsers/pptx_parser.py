@@ -1,42 +1,6 @@
-"""PPTX parser using python-pptx with simple slide text extraction."""
-
 from __future__ import annotations
-
-from typing import Iterator, Optional
-
-from .base import BaseParser, RawBlock, ensure_dependency
-
-
-class PptxParser(BaseParser):
-    def parse(self, path: str, *, doc_id: Optional[str] = None) -> Iterator[RawBlock]:
-        ensure_dependency("pptx", "pip install python-pptx")
-        from pptx import Presentation  # type: ignore
-
-        resolved_id = self._resolve_doc_id(path, doc_id)
-        prs = Presentation(path)
-        for idx, slide in enumerate(prs.slides, start=1):
-            title = None
-            if getattr(slide, "shapes", None):
-                for shape in slide.shapes:
-                    if getattr(shape, "has_text_frame", False):
-                        text = shape.text or ""
-                        if not title and getattr(shape, "name", "").lower().startswith("title"):
-                            title = text.strip() or None
-                        if text.strip():
-                            yield RawBlock(
-                                text=text.strip(),
-                                meta={
-                                    "doc_id": resolved_id,
-                                    "type": "pptx",
-                                    "path": path,
-                                    "slide": idx,
-                                    "title": title,
-                                },
-                            )
 
 """Convert PowerPoint presentations into slide level blocks."""
-
-from __future__ import annotations
 
 import logging
 from typing import Iterator, Optional
