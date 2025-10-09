@@ -50,7 +50,7 @@ class TEIEmbeddings(Embeddings):
     def _embed(self, texts: List[str]) -> List[List[float]]:
         start_ts = time.time()
         try:
-            resp = requests.post(f"{self.base_url}/embed", json={"input": texts}, timeout=60)
+            resp = requests.post(f"{self.base_url}/embed", json={"inputs": texts}, timeout=60)
             resp.raise_for_status()
             data = resp.json().get("data", [])
             embeddings = [item.get("embedding", []) for item in data]
@@ -122,7 +122,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         content_type = file.content_type or ""
         LOGGER.info(
             "upload_received",
-            extra={"filename": filename, "suffix": suffix, "content_type": content_type, "size": len(content)},
+            extra={"upload_filename": filename, "suffix": suffix, "content_type": content_type, "size": len(content)},
         )
 
         # 1) Persist upload to a temporary path for parsers that require a file path
@@ -182,7 +182,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             raise HTTPException(status_code=500, detail="Parsing failed")
 
         if not parser_blocks:
-            LOGGER.warning("no_blocks", extra={"filename": filename, "suffix": suffix})
+            LOGGER.warning("no_blocks", extra={"upload_filename": filename, "suffix": suffix})
             raise HTTPException(status_code=400, detail="Parser produced no content")
 
         # 3) Normalize and chunk each block with rich metadata
@@ -201,7 +201,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                 chunk_dicts.append(chunk.to_dict())
 
         if not chunk_dicts:
-            LOGGER.warning("no_chunks", extra={"doc_id": doc_id, "filename": filename})
+            LOGGER.warning("no_chunks", extra={"doc_id": doc_id, "upload_filename": filename})
             raise HTTPException(status_code=400, detail="No chunks produced")
 
         # 4) Deduplicate

@@ -27,7 +27,7 @@ class TEIEmbeddings(Embeddings):
         return self._embed([text])[0]
 
     def _embed(self, texts: List[str]) -> List[List[float]]:
-        resp = requests.post(f"{self.base_url}/embed", json={"input": texts}, timeout=60)
+        resp = requests.post(f"{self.base_url}/embed", json={"inputs": texts}, timeout=60)
         resp.raise_for_status()
         data = resp.json().get("data", [])
         return [item.get("embedding", []) for item in data]
