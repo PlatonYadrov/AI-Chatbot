@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams
+from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
 from processors.normalizer import normalize_text
 from processors.chunker import chunk_text
@@ -232,26 +232,27 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             },
         )
 
-        # 5) Upsert into Qdrant with metadata
+        # 5) Upsert into Qdrant with deterministic IDs (chunk_id)
         _ensure_collection()
         texts = [c["text"] for c in unique_chunks]
         metadatas = [c["metadata"] for c in unique_chunks]
 
         try:
             start_qdrant = time.time()
-            Qdrant.from_texts(
-                texts=texts,
-                embedding=embeddings,
-                metadatas=metadatas,
-                url=QDRANT_URL,
-                prefer_grpc=False,
-                collection_name=QDRANT_COLLECTION,
-            )
+            vectors = embeddings.embed_documents(texts)
+            points = []
+            for text_value, vec, meta in zip(texts, vectors, metadatas):
+                pid = meta.get("chunk_id") or hashlib.sha1((meta.get("doc_id", "") + meta.get("language", "") + meta.get("type", "") + meta.get("path", "") + meta.get("source_uri", "")).encode("utf-8")).hexdigest()[:16]
+                payload = {**meta}
+                # persist chunk text for downstream inspection
+                payload.setdefault("text", text_value)
+                points.append(PointStruct(id=pid, vector=vec, payload=payload))
+            client.upsert(collection_name=QDRANT_COLLECTION, points=points, wait=True)
             LOGGER.info(
                 "qdrant_upsert_ok",
                 extra={
                     "collection": QDRANT_COLLECTION,
-                    "count": len(texts),
+                    "count": len(points),
                     "elapsed_ms": int((time.time() - start_qdrant) * 1000),
                 },
             )

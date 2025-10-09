@@ -1,9 +1,10 @@
 """Simple client for local vLLM OpenAI-compatible endpoint."""
 
 import os
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import requests
+import re
 
 
 VLLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8000/v1")
@@ -20,7 +21,7 @@ def _post(path: str, payload: dict) -> dict:
 
 
 def generate_response(prompt: str, max_tokens: int = 512, temperature: float = 0.2, top_p: float = 0.95,
-                      stop: Optional[List[str]] = None) -> str:
+                      stop: Optional[List[str]] = None) -> Tuple[str, str]:
     messages = [
         {"role": "system", "content": "You are a helpful, concise assistant."},
         {"role": "user", "content": prompt},
@@ -38,4 +39,11 @@ def generate_response(prompt: str, max_tokens: int = 512, temperature: float = 0
     data = _post("/chat/completions", payload)
     choice = data.get("choices", [{}])[0]
     content = choice.get("message", {}).get("content", "")
-    return content
+    thoughts = ""
+    if "<think>" in content:
+        # capture inner think text and remove it from final answer
+        m = re.search(r"<think>(.*?)</think>", content, flags=re.S)
+        if m:
+            thoughts = m.group(1).strip()
+        content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.S).strip()
+    return content, thoughts

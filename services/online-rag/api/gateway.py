@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
@@ -45,6 +45,8 @@ class TEIEmbeddings(Embeddings):
 class QueryRequest(BaseModel):
     query: str
     k: int = 4
+    include_vectors: bool = False
+    vector_top_n: int = 10
 
 
 app = FastAPI(title="RAG Gateway")
@@ -63,5 +65,38 @@ def query_endpoint(req: QueryRequest):
     docs = vs.similarity_search(req.query, k=req.k)
     context = "\n\n".join(d.page_content for d in docs)
     prompt = f"Answer the question using the context.\n\nContext:\n{context}\n\nQuestion: {req.query}"
-    answer = generate_response(prompt)
-    return {"answer": answer, "sources": [getattr(d, 'metadata', {}) for d in docs]}
+    answer, thoughts = generate_response(prompt)
+
+    sources = []
+    for d in docs:
+        meta = getattr(d, 'metadata', {})
+        # try both common keys for chunk text
+        if 'text' not in meta and hasattr(d, 'page_content'):
+            meta = {**meta, 'text': getattr(d, 'page_content')}
+        sources.append(meta)
+    if req.include_vectors:
+        try:
+            from qdrant_client import QdrantClient
+            from qdrant_client.http import models as qm
+            client = QdrantClient(url=QDRANT_URL)
+            # fetch points with vectors by chunk_id
+            enriched = []
+            for meta in sources:
+                cid = meta.get("chunk_id")
+                if not cid:
+                    enriched.append(meta)
+                    continue
+                res = client.retrieve(collection_name=QDRANT_COLLECTION, ids=[cid], with_vectors=True)
+                if res:
+                    vec = res[0].vector
+                    if not isinstance(vec, list):
+                        # named vector
+                        vec = list(vec.values())[0]
+                    meta = {**meta, "vector_head": vec[: max(0, int(req.vector_top_n))], "vector_dim": len(vec)}
+                enriched.append(meta)
+            sources = enriched
+        except Exception:
+            # if enrichment fails, return sources as-is
+            pass
+
+    return {"answer": answer, "thoughts": thoughts, "sources": sources}
