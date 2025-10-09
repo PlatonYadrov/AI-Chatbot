@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def extract_metadata(
@@ -39,6 +43,7 @@ def extract_metadata(
         from langdetect import detect
         metadata["language"] = detect(chunk_text)
     except Exception:
+        LOGGER.debug("langdetect_unavailable_or_failed")
         metadata["language"] = doc_metadata.get("language", "unknown")
     
     return metadata

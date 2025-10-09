@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Sequence
 
@@ -29,6 +30,7 @@ except ImportError:
 
 DEFAULT_SEPARATORS: Sequence[str] = ("\n## ", "\n### ", "\n\n", "\n", ". ", " ")
 
+LOGGER = logging.getLogger(__name__)
 
 class Chunk:
     """Represents a text chunk with metadata."""
@@ -44,8 +46,12 @@ class Chunk:
 def _load_config() -> dict:
     config_path = Path(__file__).parents[3] / "configs" / "model_config.yaml"
     if _YAML_OK and config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            LOGGER.exception("chunker_config_load_failed", extra={"path": str(config_path)})
+            return {}
     return {}
 
 
@@ -54,6 +60,7 @@ def _get_tokenizer(model_name: str = "cl100k_base"):
         try:
             return tiktoken.get_encoding(model_name)
         except Exception:
+            LOGGER.exception("tokenizer_get_failed", extra={"model": model_name})
             return tiktoken.get_encoding("cl100k_base")
     return None
 
@@ -108,6 +115,16 @@ def chunk_text(
     min_chunk_tokens = config.get("min_chunk_tokens", min_chunk_tokens)
     max_chunk_tokens = config.get("max_chunk_tokens", max_chunk_tokens)
     strategy = config.get("strategy", strategy)
+    LOGGER.info(
+        "chunker_config",
+        extra={
+            "strategy": strategy,
+            "chunk_size_tokens": chunk_size_tokens,
+            "overlap_tokens": overlap_tokens,
+            "min_chunk_tokens": min_chunk_tokens,
+            "max_chunk_tokens": max_chunk_tokens,
+        },
+    )
     
     tokenizer = _get_tokenizer()
     doc_metadata = doc_metadata or {}
@@ -141,6 +158,7 @@ def chunk_text(
         }
         chunks.append(Chunk(chunk_text, chunk_metadata))
     
+    LOGGER.info("chunker_result", extra={"chunks": len(chunks)})
     return chunks
 
 
@@ -246,21 +264,26 @@ def _apply_overlap(chunks: Sequence[str], overlap: int) -> List[str]:
 def _semantic_chunk(text: str, chunk_size: int) -> List[str]:
     """Semantic chunking using sentence embeddings."""
     if not _ST_OK:
+        LOGGER.info("semantic_chunk_fallback_recursive")
         return _recursive_chunk(text, chunk_size, chunk_size // 5)
-    
-    model = SentenceTransformer("intfloat/multilingual-e5-base")
-    sentences = _split_sentences(text)
-    if not sentences:
-        return []
-    
-    embeddings = model.encode(sentences, batch_size=32, normalize_embeddings=True)
+
+    try:
+        model = SentenceTransformer("intfloat/multilingual-e5-base")
+        sentences = _split_sentences(text)
+        if not sentences:
+            return []
+        embeddings = model.encode(sentences, batch_size=32, normalize_embeddings=True)
+    except Exception:
+        LOGGER.exception("semantic_chunk_failed")
+        return _recursive_chunk(text, chunk_size, chunk_size // 5)
+
     boundaries = [0]
     for idx in range(len(sentences) - 1):
         similarity = float(embeddings[idx] @ embeddings[idx + 1])
         if similarity < 0.55:
             boundaries.append(idx + 1)
     boundaries.append(len(sentences))
-    
+
     chunks: List[str] = []
     i = 0
     while i < len(boundaries) - 1:

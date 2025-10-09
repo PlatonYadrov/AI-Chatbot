@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import List, Set, Dict, Any
 
 try:
@@ -26,6 +27,9 @@ def _minhash_signature(text: str, num_perm: int = 128) -> MinHash:
     return m
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def deduplicate_chunks(chunks: List[Dict[str, Any]], threshold: float = 0.8) -> List[Dict[str, Any]]:
     """
     Deduplicate chunks using MinHash LSH.
@@ -38,7 +42,7 @@ def deduplicate_chunks(chunks: List[Dict[str, Any]], threshold: float = 0.8) -> 
         Deduplicated list of chunks
     """
     if not _MINHASH_OK:
-        # Fallback: exact hash dedup
+        LOGGER.info("dedup_fallback_exact")
         return _exact_hash_dedup(chunks)
     
     lsh = MinHashLSH(threshold=threshold, num_perm=128)
@@ -54,16 +58,25 @@ def deduplicate_chunks(chunks: List[Dict[str, Any]], threshold: float = 0.8) -> 
         mh = _minhash_signature(text)
         
         # Query LSH for duplicates
-        duplicates = lsh.query(mh)
+        try:
+            duplicates = lsh.query(mh)
+        except Exception:
+            LOGGER.exception("lsh_query_failed")
+            duplicates = []
         if duplicates:
             # Skip if similar chunk already indexed
             continue
         
         # Insert and keep
-        lsh.insert(chunk_id, mh)
+        try:
+            lsh.insert(chunk_id, mh)
+        except Exception:
+            LOGGER.exception("lsh_insert_failed", extra={"chunk_id": chunk_id})
+            continue
         seen_ids.add(chunk_id)
         unique_chunks.append(chunk)
     
+    LOGGER.info("dedup_result", extra={"input": len(chunks), "unique": len(unique_chunks)})
     return unique_chunks
 
 
@@ -81,6 +94,7 @@ def _exact_hash_dedup(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             seen_hashes.add(h)
             unique_chunks.append(chunk)
     
+    LOGGER.info("exact_dedup_result", extra={"input": len(chunks), "unique": len(unique_chunks)})
     return unique_chunks
 
 

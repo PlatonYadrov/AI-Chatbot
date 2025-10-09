@@ -24,7 +24,11 @@ class PptxParser(BaseParser):
         resolved_id = self._resolve_doc_id(path, doc_id)
         LOGGER.debug("Parsing PPTX document", extra={"doc_id": resolved_id, "path": path})
 
-        presentation = Presentation(path)
+        try:
+            presentation = Presentation(path)
+        except Exception:
+            LOGGER.exception("pptx_open_failed", extra={"path": path})
+            raise
         for slide_index, slide in enumerate(presentation.slides, start=1):
             fragments: list[str] = []
             for shape in slide.shapes:

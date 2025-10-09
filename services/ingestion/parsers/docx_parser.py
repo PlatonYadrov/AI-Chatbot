@@ -33,7 +33,11 @@ class DocxParser(BaseParser):
         resolved_id = self._resolve_doc_id(path, doc_id)
         LOGGER.debug("Parsing DOCX document", extra={"doc_id": resolved_id, "path": path})
 
-        document = Document(path)
+        try:
+            document = Document(path)
+        except Exception:
+            LOGGER.exception("docx_open_failed", extra={"path": path})
+            raise
         heading_stack: list[str] = []
         blocks: list[RawBlock] = []
 

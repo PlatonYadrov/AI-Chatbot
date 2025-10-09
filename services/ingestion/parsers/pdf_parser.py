@@ -31,7 +31,11 @@ class PdfParser(BaseParser):
         resolved_id = self._resolve_doc_id(path, doc_id)
         LOGGER.debug("Parsing PDF document", extra={"doc_id": resolved_id, "path": path})
 
-        document = fitz.open(path)
+        try:
+            document = fitz.open(path)
+        except Exception:
+            LOGGER.exception("pdf_open_failed", extra={"path": path})
+            raise
         try:
             for page_index, page in enumerate(document, start=1):
                 blocks = list(page.get_text("blocks"))
@@ -72,25 +76,29 @@ class PdfParser(BaseParser):
         import pdfplumber  # type: ignore
         import pandas as pd
 
-        with pdfplumber.open(path) as pdf:
-            for page_index, page in enumerate(pdf.pages, start=1):
-                for table in page.extract_tables() or []:
-                    if not table:
-                        continue
-                    header, *rows = table
-                    if not header or not rows:
-                        continue
-                    frame = pd.DataFrame(rows, columns=header)
-                    text = frame.to_markdown(index=False)
-                    yield RawBlock(
-                        text=text,
-                        meta={
-                            "doc_id": doc_id,
-                            "type": "pdf_table",
-                            "path": path,
-                            "page": page_index,
-                        },
-                    )
+        try:
+            with pdfplumber.open(path) as pdf:
+                for page_index, page in enumerate(pdf.pages, start=1):
+                    for table in page.extract_tables() or []:
+                        if not table:
+                            continue
+                        header, *rows = table
+                        if not header or not rows:
+                            continue
+                        frame = pd.DataFrame(rows, columns=header)
+                        text = frame.to_markdown(index=False)
+                        yield RawBlock(
+                            text=text,
+                            meta={
+                                "doc_id": doc_id,
+                                "type": "pdf_table",
+                                "path": path,
+                                "page": page_index,
+                            },
+                        )
+        except Exception:
+            LOGGER.exception("pdf_table_extract_failed", extra={"path": path})
+            return
 
     @staticmethod
     def _clean_block(text: str) -> str:
