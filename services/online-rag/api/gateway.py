@@ -29,8 +29,17 @@ class TEIEmbeddings(Embeddings):
     def _embed(self, texts: List[str]) -> List[List[float]]:
         resp = requests.post(f"{self.base_url}/embed", json={"inputs": texts}, timeout=60)
         resp.raise_for_status()
-        data = resp.json().get("data", [])
-        return [item.get("embedding", []) for item in data]
+        payload = resp.json()
+        if isinstance(payload, list):
+            return [p.get("embedding", []) if isinstance(p, dict) else p for p in payload]
+        if isinstance(payload, dict):
+            if "data" in payload:
+                return [item.get("embedding", []) for item in payload.get("data", [])]
+            if "embeddings" in payload:
+                return payload.get("embeddings", [])
+            if "embedding" in payload:
+                return [payload.get("embedding", [])]
+        return []
 
 
 class QueryRequest(BaseModel):

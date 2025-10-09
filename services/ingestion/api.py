@@ -52,18 +52,32 @@ class TEIEmbeddings(Embeddings):
         try:
             resp = requests.post(f"{self.base_url}/embed", json={"inputs": texts}, timeout=60)
             resp.raise_for_status()
-            data = resp.json().get("data", [])
-            embeddings = [item.get("embedding", []) for item in data]
+            payload = resp.json()
+            # TEI may return one of:
+            # 1) [{...vector...}, {...}] or [[...], [...]]
+            # 2) {"data": [{"embedding": [...]}, ...]}
+            # 3) {"embeddings": [[...], [...]]}
+            if isinstance(payload, list):
+                embeddings = [p.get("embedding", []) if isinstance(p, dict) else p for p in payload]
+            elif isinstance(payload, dict):
+                if "data" in payload:
+                    embeddings = [item.get("embedding", []) for item in payload.get("data", [])]
+                elif "embeddings" in payload:
+                    embeddings = payload.get("embeddings", [])
+                elif "embedding" in payload:
+                    embeddings = [payload.get("embedding", [])]
+                else:
+                    embeddings = []
+            else:
+                embeddings = []
             LOGGER.info(
-                "embeddings_ok",
-                extra={
-                    "endpoint": f"{self.base_url}/embed",
-                    "count": len(texts),
-                    "elapsed_ms": int((time.time() - start_ts) * 1000),
-                },
+                "embeddings_ok endpoint=%s count=%s elapsed_ms=%s",
+                f"{self.base_url}/embed",
+                len(texts),
+                int((time.time() - start_ts) * 1000),
             )
             return embeddings
-        except Exception as exc:
+        except Exception:
             LOGGER.exception(
                 "embeddings_failed",
                 extra={"endpoint": f"{self.base_url}/embed", "count": len(texts)},
