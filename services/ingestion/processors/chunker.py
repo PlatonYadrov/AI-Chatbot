@@ -44,7 +44,18 @@ class Chunk:
 
 
 def _load_config() -> dict:
-    config_path = Path(__file__).parents[3] / "configs" / "model_config.yaml"
+    # Resolve config relative to app root when packaged into /app
+    # Try conventional path first, then fall back to env or CWD
+    candidates = []
+    try:
+        candidates.append(Path(__file__).resolve().parents[2] / "configs" / "model_config.yaml")
+    except Exception:
+        pass
+    candidates.append(Path("/app/configs/model_config.yaml"))
+    candidates.append(Path.cwd() / "configs" / "model_config.yaml")
+    config_path = next((p for p in candidates if p.exists()), None)
+    if not config_path:
+        return {}
     if _YAML_OK and config_path.exists():
         try:
             with open(config_path, "r", encoding="utf-8") as f:

@@ -86,7 +86,11 @@ class PdfParser(BaseParser):
                         if not header or not rows:
                             continue
                         frame = pd.DataFrame(rows, columns=header)
-                        text = frame.to_markdown(index=False)
+                        try:
+                            text = frame.to_markdown(index=False)
+                        except Exception:
+                            # Fallback to CSV-like if tabulate missing
+                            text = "\n".join([",".join(map(str, header))] + [",".join(map(str, r)) for r in rows])
                         yield RawBlock(
                             text=text,
                             meta={

@@ -121,8 +121,11 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         suffix = (filename.split(".")[-1] if "." in filename else "").lower()
         content_type = file.content_type or ""
         LOGGER.info(
-            "upload_received",
-            extra={"upload_filename": filename, "suffix": suffix, "content_type": content_type, "size": len(content)},
+            "upload_received filename=%s suffix=%s content_type=%s size=%s",
+            filename,
+            suffix,
+            content_type,
+            len(content),
         )
 
         # 1) Persist upload to a temporary path for parsers that require a file path
@@ -182,7 +185,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             raise HTTPException(status_code=500, detail="Parsing failed")
 
         if not parser_blocks:
-            LOGGER.warning("no_blocks", extra={"upload_filename": filename, "suffix": suffix})
+            LOGGER.warning("no_blocks filename=%s suffix=%s", filename, suffix)
             raise HTTPException(status_code=400, detail="Parser produced no content")
 
         # 3) Normalize and chunk each block with rich metadata
@@ -201,7 +204,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                 chunk_dicts.append(chunk.to_dict())
 
         if not chunk_dicts:
-            LOGGER.warning("no_chunks", extra={"doc_id": doc_id, "upload_filename": filename})
+            LOGGER.warning("no_chunks doc_id=%s filename=%s", doc_id, filename)
             raise HTTPException(status_code=400, detail="No chunks produced")
 
         # 4) Deduplicate
