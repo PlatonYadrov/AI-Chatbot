@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import List
 
 from fastapi import FastAPI, HTTPException, Query
@@ -85,7 +86,12 @@ def query_endpoint(req: QueryRequest):
                 if not cid:
                     enriched.append(meta)
                     continue
-                res = client.retrieve(collection_name=QDRANT_COLLECTION, ids=[cid], with_vectors=True)
+                # Compute deterministic UUID5 from chunk_id to match ingestion IDs
+                try:
+                    pid = str(uuid.uuid5(uuid.NAMESPACE_URL, str(cid)))
+                except Exception:
+                    pid = str(cid)
+                res = client.retrieve(collection_name=QDRANT_COLLECTION, ids=[pid], with_vectors=True)
                 if res:
                     record = res[0]
                     vec = getattr(record, "vector", None)

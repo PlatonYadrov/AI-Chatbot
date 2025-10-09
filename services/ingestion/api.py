@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 import os
 import time
 import logging
@@ -242,7 +243,18 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             vectors = embeddings.embed_documents(texts)
             points = []
             for text_value, vec, meta in zip(texts, vectors, metadatas):
-                pid = meta.get("chunk_id") or hashlib.sha1((meta.get("doc_id", "") + meta.get("language", "") + meta.get("type", "") + meta.get("path", "") + meta.get("source_uri", "")).encode("utf-8")).hexdigest()[:16]
+                # Use deterministic UUID based on chunk identity to satisfy Qdrant ID constraints
+                raw_id = meta.get("chunk_id") or "_".join(
+                    [
+                        str(meta.get("doc_id", "")),
+                        str(meta.get("language", "")),
+                        str(meta.get("type", "")),
+                        str(meta.get("path", "")),
+                        str(meta.get("source_uri", "")),
+                        str(meta.get("chunk_index", "0")),
+                    ]
+                )
+                pid = str(uuid.uuid5(uuid.NAMESPACE_URL, raw_id))
                 payload = {**meta}
                 # persist chunk text for downstream inspection
                 payload.setdefault("text", text_value)
