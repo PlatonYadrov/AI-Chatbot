@@ -54,10 +54,11 @@ app = FastAPI(title="RAG Gateway")
 def query_endpoint(req: QueryRequest):
     embeddings = TEIEmbeddings()
     vs = Qdrant.from_existing_collection(
-        embeddings=embeddings,
+        embedding=embeddings,
         collection_name=QDRANT_COLLECTION,
         url=QDRANT_URL,
         prefer_grpc=False,
+        path=None,
     )
     docs = vs.similarity_search(req.query, k=req.k)
     context = "\n\n".join(d.page_content for d in docs)
