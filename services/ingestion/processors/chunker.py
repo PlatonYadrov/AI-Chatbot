@@ -126,7 +126,7 @@ def chunk_text(
     min_chunk_tokens = config.get("min_chunk_tokens", min_chunk_tokens)
     max_chunk_tokens = config.get("max_chunk_tokens", max_chunk_tokens)
     strategy = config.get("strategy", strategy)
-    LOGGER.info(
+    LOGGER.debug(
         "chunker_config",
         extra={
             "strategy": strategy,
@@ -169,7 +169,7 @@ def chunk_text(
         }
         chunks.append(Chunk(chunk_text, chunk_metadata))
     
-    LOGGER.info("chunker_result", extra={"chunks": len(chunks)})
+    LOGGER.debug("chunker_result", extra={"chunks": len(chunks)})
     return chunks
 
 

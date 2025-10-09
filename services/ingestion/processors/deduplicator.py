@@ -55,13 +55,16 @@ def deduplicate_chunks(chunks: List[Dict[str, Any]], threshold: float = 0.8) -> 
             continue
         
         chunk_id = chunk.get("metadata", {}).get("chunk_id", f"chunk_{idx}")
+        # Skip if the key was already inserted earlier in this run
+        if chunk_id in seen_ids:
+            continue
         mh = _minhash_signature(text)
         
         # Query LSH for duplicates
         try:
             duplicates = lsh.query(mh)
         except Exception:
-            LOGGER.exception("lsh_query_failed")
+            LOGGER.debug("lsh_query_failed")
             duplicates = []
         if duplicates:
             # Skip if similar chunk already indexed
@@ -71,7 +74,8 @@ def deduplicate_chunks(chunks: List[Dict[str, Any]], threshold: float = 0.8) -> 
         try:
             lsh.insert(chunk_id, mh)
         except Exception:
-            LOGGER.exception("lsh_insert_failed", extra={"chunk_id": chunk_id})
+            # Key may already exist (e.g., repeated chunk_id); skip silently
+            LOGGER.debug("lsh_insert_failed", extra={"chunk_id": chunk_id})
             continue
         seen_ids.add(chunk_id)
         unique_chunks.append(chunk)
