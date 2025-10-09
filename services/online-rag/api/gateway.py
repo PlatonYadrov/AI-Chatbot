@@ -77,7 +77,6 @@ def query_endpoint(req: QueryRequest):
     if req.include_vectors:
         try:
             from qdrant_client import QdrantClient
-            from qdrant_client.http import models as qm
             client = QdrantClient(url=QDRANT_URL)
             # fetch points with vectors by chunk_id
             enriched = []
@@ -88,11 +87,18 @@ def query_endpoint(req: QueryRequest):
                     continue
                 res = client.retrieve(collection_name=QDRANT_COLLECTION, ids=[cid], with_vectors=True)
                 if res:
-                    vec = res[0].vector
-                    if not isinstance(vec, list):
-                        # named vector
-                        vec = list(vec.values())[0]
-                    meta = {**meta, "vector_head": vec[: max(0, int(req.vector_top_n))], "vector_dim": len(vec)}
+                    record = res[0]
+                    vec = getattr(record, "vector", None)
+                    # Qdrant may return named vectors under 'vector' (dict) or 'vectors'
+                    if isinstance(vec, dict):
+                        vec = next(iter(vec.values()), None)
+                    if vec is None:
+                        vectors_dict = getattr(record, "vectors", None)
+                        if isinstance(vectors_dict, dict):
+                            vec = next(iter(vectors_dict.values()), None)
+                    if isinstance(vec, (list, tuple)) and len(vec) > 0:
+                        head_n = max(0, int(req.vector_top_n))
+                        meta = {**meta, "vector_head": list(vec)[: head_n], "vector_dim": len(vec)}
                 enriched.append(meta)
             sources = enriched
         except Exception:
