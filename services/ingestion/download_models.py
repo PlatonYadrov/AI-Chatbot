@@ -19,8 +19,10 @@ def download_models():
     
     # Import Docling
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.datamodel.base_models import InputFormat
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     except ImportError:
         print("ERROR: Docling not installed")
         print("Run: pip install docling")
@@ -57,11 +59,13 @@ def download_models():
         pipeline_options.do_ocr = True
         pipeline_options.do_table_structure = True
         
-        # New Docling API: pass options via format_options
+        # New Docling API: wrap into PdfFormatOption and set backend
+        pdf_fmt_option = PdfFormatOption(
+            pipeline_options=pipeline_options,
+            backend=PyPdfiumDocumentBackend,
+        )
         converter = DocumentConverter(
-            format_options={
-                "pdf": pipeline_options,
-            }
+            format_options={InputFormat.PDF: pdf_fmt_option}
         )
         
         if test_pdf:

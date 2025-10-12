@@ -94,13 +94,15 @@
 Все модели загружаются **автоматически** при первом использовании:
 
 ```python
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
 
 # При первом запуске загрузит все нужные модели (новый API)
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-
 options = PdfPipelineOptions()
-converter = DocumentConverter(format_options={"pdf": options})
+converter = DocumentConverter(
+    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+)
 result = converter.convert("document.pdf")
 ```
 
@@ -139,15 +141,18 @@ rm -rf ~/.cache/huggingface/hub/models--ds4sd*
 ### Базовая (Layout + Tables)
 
 ```python
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
+from docling.datamodel.base_models import InputFormat
 
 options = PdfPipelineOptions()
 options.do_ocr = False  # Без OCR (только текстовый слой)
 options.do_table_structure = True
 options.table_structure_options.mode = TableFormerMode.FAST
 
-converter = DocumentConverter(format_options={"pdf": options})
+converter = DocumentConverter(
+    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+)
 ```
 
 ### С OCR
@@ -175,14 +180,18 @@ options.generate_picture_images = True
 pip install "docling[vlm]"
 
 # Использование
-from docling.pipeline.vlm_pipeline import VlmPipeline
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
 
 options = PdfPipelineOptions()
 options.do_ocr = True
 options.do_table_structure = True
 options.use_vlm = True  # Включить Vision Language Model
 
-converter = DocumentConverter(format_options={"pdf": options})
+converter = DocumentConverter(
+    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+)
 ```
 
 ---

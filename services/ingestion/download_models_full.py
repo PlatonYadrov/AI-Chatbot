@@ -25,11 +25,13 @@ def download_all_models(include_vlm: bool = False):
     
     # Import Docling
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import (
             PdfPipelineOptions,
             TableFormerMode,
         )
+        from docling.datamodel.base_models import InputFormat
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     except ImportError:
         print("ERROR: Docling not installed")
         print("Run: pip install docling")
@@ -135,12 +137,13 @@ def download_all_models(include_vlm: bool = False):
     print("Models will download now (this may take 5-15 minutes)...")
     
     try:
-        # New Docling API: pass options in format_options
-        # Backend is set automatically by Docling based on options
+        # New Docling API: wrap into PdfFormatOption and set backend explicitly
+        pdf_fmt_option = PdfFormatOption(
+            pipeline_options=options,
+            backend=PyPdfiumDocumentBackend,
+        )
         converter = DocumentConverter(
-            format_options={
-                "pdf": options,
-            }
+            format_options={InputFormat.PDF: pdf_fmt_option}
         )
         print("✓ Converter initialized")
         

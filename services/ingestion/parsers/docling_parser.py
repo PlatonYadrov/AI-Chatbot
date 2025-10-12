@@ -72,8 +72,10 @@ class DoclingParser(BaseParser):
             RawBlock objects with text and metadata
         """
         ensure_dependency("docling", "pip install docling")
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
+        from docling.datamodel.base_models import InputFormat
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
         
         resolved_id = self._resolve_doc_id(path, doc_id)
         path_obj = Path(path)
@@ -125,12 +127,13 @@ class DoclingParser(BaseParser):
                     LOGGER.warning(f"VLM not available: {e}")
                     LOGGER.warning("Install with: pip install 'docling[vlm]'")
             
-            # Initialize converter with all models (new Docling API)
-            # Backend is automatically selected by Docling
+            # Initialize converter with all models (Docling 2.55 API)
+            pdf_fmt_option = PdfFormatOption(
+                pipeline_options=pipeline_options,
+                backend=PyPdfiumDocumentBackend,
+            )
             converter = DocumentConverter(
-                format_options={
-                    "pdf": pipeline_options,
-                }
+                format_options={InputFormat.PDF: pdf_fmt_option}
             )
             
             # Convert document (all processing is local)
