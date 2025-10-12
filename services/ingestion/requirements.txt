@@ -1,31 +1,31 @@
+# FastAPI & Web Framework
 fastapi==0.110.0
 uvicorn==0.29.0
+python-multipart==0.0.9
+
+# HTTP & Network
 requests==2.32.3
+
+# Vector Database & Embeddings
+qdrant-client==1.9.1
 langchain==0.2.6
 langchain-community==0.2.6
-qdrant-client==1.9.1
+
+# Data Processing
 numpy==1.26.4
 pydantic==2.7.1
 tiktoken==0.6.0
 pyyaml==6.0.1
+
+# Deduplication & Language Detection
 datasketch==1.6.4
 langdetect==1.0.9
-sentence-transformers==2.7.0
-python-multipart==0.0.9
-tabulate==0.9.0
 
-# Docling - unified document processing library with all models
+# Docling - Unified Document Processing (replaces all legacy parsers)
+# Includes: PDF, DOCX, PPTX, XLSX, HTML, Images, OCR, Tables, Formulas
 docling>=2.0.0
-# Optional: VLM support (uncomment for image understanding, requires GPU)
-docling[vlm]>=2.0.0  # VLM ENABLED - requires GPU!
 
-# Legacy parsers (kept for backward compatibility, but Docling is preferred)
-python-docx==1.1.0
-python-pptx==0.6.23
-pdfplumber==0.11.0
-PyMuPDF==1.24.9
-openpyxl==3.1.5
-pandas==2.2.2
-beautifulsoup4==4.12.3
-lxml==5.2.1
+# Optional: VLM for advanced image understanding (requires GPU)
+# Uncomment ONLY if you have spare VRAM (4-6GB) after vLLM allocation
+# docling[vlm]>=2.0.0
 
