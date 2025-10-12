@@ -185,7 +185,9 @@ def download_all_models(include_vlm: bool = False):
             os.remove(test_pdf)
     
     print("\n[5/5] Verifying downloaded models...")
-    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    # Honor HF_HOME from environment (Dockerfile sets HF_HOME=/app/.cache/huggingface)
+    hf_home = os.getenv("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+    cache_dir = Path(hf_home) / "hub"
     
     if cache_dir.exists():
         models = list(cache_dir.glob("models--ds4sd--*"))
@@ -221,6 +223,7 @@ def download_all_models(include_vlm: bool = False):
                 print(f"    ✓ {model_name}: {size_gb:.2f} GB")
     else:
         print(f"⚠ Cache directory not found: {cache_dir}")
+        print("  Hint: ensure HF_HOME is set consistently (see Dockerfile)")
     
     print("\n" + "=" * 70)
     print("✓ ALL MODELS DOWNLOADED!")
@@ -231,6 +234,7 @@ def download_all_models(include_vlm: bool = False):
     print("  ✓ Formula detection")
     print("  ✓ Code block detection")
     print("  ✓ OCR (Tesseract)")
+    vlm_models = locals().get("vlm_models", [])  # ensure defined
     if include_vlm or vlm_models:
         print("  ✓ Image understanding (VLM)")
     print("\nYou can now disconnect from the internet!")
