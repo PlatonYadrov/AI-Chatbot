@@ -39,42 +39,54 @@ def download_all_models(include_vlm: bool = False):
     
     print("\n[1/5] Creating test documents...")
     
-    # Create test PDF with table, formula, and code
+    # Create simple test document using reportlab (lighter dependency)
+    test_pdf = None
     try:
-        import fitz  # PyMuPDF
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            doc = fitz.open()
-            page = doc.new_page()
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import letter
+        
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False, mode='wb') as tmp:
+            c = canvas.Canvas(tmp.name, pagesize=letter)
             
             # Title
-            page.insert_text((72, 72), "Test Document for Model Download", fontsize=16)
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(72, 750, "Test Document for Model Download")
             
             # Table
-            page.insert_text((72, 120), "Sample Table:", fontsize=12)
-            page.insert_text((72, 140), "Column1    Column2    Column3", fontsize=10)
-            page.insert_text((72, 160), "Value1     Value2     Value3", fontsize=10)
-            page.insert_text((72, 180), "Data1      Data2      Data3", fontsize=10)
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, 700, "Sample Table:")
+            c.setFont("Helvetica", 10)
+            c.drawString(72, 680, "Column1    Column2    Column3")
+            c.drawString(72, 665, "Value1     Value2     Value3")
+            c.drawString(72, 650, "Data1      Data2      Data3")
             
-            # Formula (LaTeX style)
-            page.insert_text((72, 220), "Formula: E = mc²", fontsize=12)
-            page.insert_text((72, 240), "∫ f(x)dx = F(x) + C", fontsize=12)
+            # Formula
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, 600, "Formula: E = mc²")
+            c.drawString(72, 580, "∫ f(x)dx = F(x) + C")
             
             # Code block
-            page.insert_text((72, 280), "Code example:", fontsize=12)
-            page.insert_text((72, 300), "def hello_world():", fontsize=10)
-            page.insert_text((72, 315), "    print('Hello, World!')", fontsize=10)
-            page.insert_text((72, 330), "    return True", fontsize=10)
+            c.setFont("Courier", 10)
+            c.drawString(72, 540, "def hello_world():")
+            c.drawString(90, 525, "print('Hello, World!')")
+            c.drawString(90, 510, "return True")
             
-            # Section header
-            page.insert_text((72, 370), "Section 1: Introduction", fontsize=14)
-            page.insert_text((72, 395), "This is a paragraph with normal text.", fontsize=11)
+            # Section
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(72, 470, "Section 1: Introduction")
+            c.setFont("Helvetica", 11)
+            c.drawString(72, 450, "This is a paragraph with normal text for testing.")
             
-            doc.save(tmp.name)
-            doc.close()
+            c.save()
             test_pdf = tmp.name
         print(f"✓ Test PDF created: {test_pdf}")
+    except ImportError:
+        print("⚠ reportlab not installed, skipping test PDF creation")
+        print("  Models will still be downloaded on first use")
+        test_pdf = None
     except Exception as e:
-        print(f"✗ Failed to create test PDF: {e}")
+        print(f"⚠ Failed to create test PDF: {e}")
+        print("  Models will still be downloaded on first use")
         test_pdf = None
     
     print("\n[2/5] Configuring pipeline options...")
@@ -123,7 +135,12 @@ def download_all_models(include_vlm: bool = False):
     print("Models will download now (this may take 5-15 minutes)...")
     
     try:
-        converter = DocumentConverter(pipeline_options=options)
+        # New Docling API: pass options in format_options
+        converter = DocumentConverter(
+            format_options={
+                "pdf": options,
+            }
+        )
         print("✓ Converter initialized")
         
         if test_pdf:
