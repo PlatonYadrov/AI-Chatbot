@@ -30,6 +30,7 @@ def download_all_models(include_vlm: bool = False):
             PdfPipelineOptions,
             TableFormerMode,
         )
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     except ImportError:
         print("ERROR: Docling not installed")
         print("Run: pip install docling")
@@ -102,6 +103,9 @@ def download_all_models(include_vlm: bool = False):
     try:
         # Configure to use ALL models
         options = PdfPipelineOptions()
+        
+        # Set backend (required in new Docling API)
+        options.backend = PyPdfiumDocumentBackend
         
         # Enable OCR
         options.do_ocr = True
