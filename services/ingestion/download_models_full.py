@@ -157,9 +157,18 @@ def download_all_models(include_vlm: bool = False):
             items = list(result.document.iterate_items())
             print(f"✓ Processed {len(items)} elements")
             
-            # Show detected types
+            # Show detected types (support both (item, level) tuples and plain items)
             from collections import Counter
-            types = Counter(item[0].label for item, _ in items if hasattr(item, 'label'))
+            def _extract_item(elem):
+                try:
+                    obj, _lvl = elem  # tuple(item, level)
+                    return obj
+                except Exception:
+                    return elem  # plain item
+            types = Counter(
+                getattr(_extract_item(elem), 'label', 'unknown')
+                for elem in items
+            )
             print("\n  Detected element types:")
             for elem_type, count in types.most_common():
                 print(f"    - {elem_type}: {count}")
