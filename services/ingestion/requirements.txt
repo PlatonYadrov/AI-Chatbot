@@ -11,6 +11,15 @@ pyyaml==6.0.1
 datasketch==1.6.4
 langdetect==1.0.9
 sentence-transformers==2.7.0
+python-multipart==0.0.9
+tabulate==0.9.0
+
+# Docling - unified document processing library with all models
+docling>=2.0.0
+# Optional: VLM support (uncomment for image understanding, requires GPU)
+docling[vlm]>=2.0.0  # VLM ENABLED - requires GPU!
+
+# Legacy parsers (kept for backward compatibility, but Docling is preferred)
 python-docx==1.1.0
 python-pptx==0.6.23
 pdfplumber==0.11.0
@@ -19,6 +28,4 @@ openpyxl==3.1.5
 pandas==2.2.2
 beautifulsoup4==4.12.3
 lxml==5.2.1
-python-multipart==0.0.9
-tabulate==0.9.0
 

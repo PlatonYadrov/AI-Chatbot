@@ -8,6 +8,26 @@ services:
       - "6000:6000"
     volumes:
       - rag_data:/data
+      # Mount Docling model cache for offline operation
+      - docling_models:/app/.cache/huggingface
+    environment:
+      # Docling local configuration
+      - DOCLING_OFFLINE_MODE=true
+      - DOCLING_OCR_ENABLED=true
+      - DOCLING_EXTRACT_TABLES=true
+      - DOCLING_CACHE_DIR=/app/.cache/huggingface
+      - HF_HOME=/app/.cache/huggingface
+      - TRANSFORMERS_CACHE=/app/.cache/huggingface
+      - TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/
+      # VLM disabled by default - uncomment if you have spare VRAM
+      # - CUDA_VISIBLE_DEVICES=1
+    # deploy:  # VLM disabled to save VRAM for vLLM
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           device_ids: ['1']
+    #           capabilities: [gpu]
     depends_on:
       - embeddings
       - ocr
@@ -38,15 +58,18 @@ services:
     image: vllm/vllm-openai:v0.10.0
     environment:
       - VLLM_USE_V1=0
+      - CUDA_VISIBLE_DEVICES=0,1  # vLLM uses both GPUs (L4 24GB each)
     command: >-
       --model cognitivecomputations/Qwen3-30B-A3B-AWQ
       --max-model-len 8000
       --dtype half
-      --gpu-memory-utilization 0.90
+      --gpu-memory-utilization 0.92
       --disable-log-requests
       --no-enable-prefix-caching
       --tensor-parallel-size 2
       --download-dir /root/.cache
+      --max-num-seqs 64
+      --max-num-batched-tokens 8192
     ports:
       - "8000:8000"
     shm_size: 32g
@@ -58,13 +81,16 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 2
+              device_ids: ['0', '1']  # vLLM on both L4 GPUs
               capabilities: [gpu]
   embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:cuda-sha-a593f66
+    environment:
+      - CUDA_VISIBLE_DEVICES=1  # Use GPU 1 (L4)
     command: >-
       --model-id intfloat/e5-base
       --dtype float16
+      --max-batch-tokens 16384
     ports:
       - "8080:80"
     volumes:
@@ -74,10 +100,11 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ['1']  # Embeddings on GPU 1 (~2GB VRAM)
               capabilities: [gpu]
 
 volumes:
   hf_cache:
   rag_data:
   qdrant_storage:
+  docling_models:  # Persistent storage for Docling models (local, no external API)

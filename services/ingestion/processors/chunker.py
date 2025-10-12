@@ -107,9 +107,11 @@ def chunk_text(
     """
     Chunk text with token-aware sentence boundaries and metadata.
     
+    Compatible with Docling-parsed text (already cleaned and normalized).
+    
     Args:
-        normalised_text: cleaned text
-        doc_metadata: document metadata (doc_id, source_uri, etc.)
+        normalised_text: cleaned text (from Docling or other parsers)
+        doc_metadata: document metadata (doc_id, source_uri, label, headings, etc.)
         chunk_size_tokens: target chunk size in tokens
         overlap_tokens: overlap in tokens
         min_chunk_tokens: minimum chunk size (discard smaller)

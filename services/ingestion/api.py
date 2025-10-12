@@ -16,15 +16,9 @@ from langchain.embeddings.base import Embeddings
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
-from processors.normalizer import normalize_text
 from processors.chunker import chunk_text
 from processors.deduplicator import deduplicate_chunks
-from parsers.pdf_parser import PdfParser
-from parsers.docx_parser import DocxParser
-from parsers.pptx_parser import PptxParser
-from parsers.xlsx_parser import XlsxParser
-from parsers.ebook_parser import EbookParser
-from parsers.scorm_parser import ScormParser
+from parsers.docling_parser import DoclingParser
 from parsers.base import RawBlock
 
 
@@ -149,46 +143,36 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         tmp_path = tmp_dir / filename
         tmp_path.write_bytes(content)
 
-        # 2) Choose parser by file type
+        # 2) Parse document using Docling (unified parser for all formats)
         parser_blocks: list[RawBlock] = []
         doc_id = hashlib.sha256(content).hexdigest()[:16]
+        
+        # Docling supports: PDF, DOCX, PPTX, XLSX, images (PNG, JPG, TIFF), HTML, and more
+        supported_formats = {
+            "pdf", "docx", "pptx", "xlsx", "xls", "doc", "ppt",
+            "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif",
+            "html", "htm", "md", "txt"
+        }
+        
         try:
-            if suffix == "pdf":
-                LOGGER.info("select_parser", extra={"parser": "pdf", "path": str(tmp_path)})
-                parser_blocks = list(PdfParser().parse(str(tmp_path), doc_id=doc_id))
-            elif suffix == "docx":
-                LOGGER.info("select_parser", extra={"parser": "docx", "path": str(tmp_path)})
-                parser_blocks = list(DocxParser().parse(str(tmp_path), doc_id=doc_id))
-            elif suffix == "pptx":
-                LOGGER.info("select_parser", extra={"parser": "pptx", "path": str(tmp_path)})
-                parser_blocks = list(PptxParser().parse(str(tmp_path), doc_id=doc_id))
-            elif suffix == "xlsx":
-                LOGGER.info("select_parser", extra={"parser": "xlsx", "path": str(tmp_path)})
-                parser_blocks = list(XlsxParser().parse(str(tmp_path), doc_id=doc_id))
-            elif suffix in ("epub", "fb2"):
-                LOGGER.info("select_parser", extra={"parser": "ebook", "path": str(tmp_path)})
-                parser_blocks = list(EbookParser().parse(str(tmp_path), doc_id=doc_id))
-            elif suffix == "zip":
-                LOGGER.info("select_parser", extra={"parser": "scorm", "path": str(tmp_path)})
-                parser_blocks = list(ScormParser().parse(str(tmp_path), doc_id=doc_id))
+            if suffix in supported_formats or content_type.startswith("image/"):
+                LOGGER.info("select_parser", extra={"parser": "docling", "path": str(tmp_path), "suffix": suffix})
+                
+                # Configure parser from environment
+                parser = DoclingParser(
+                    extract_tables=os.getenv("DOCLING_EXTRACT_TABLES", "true").lower() == "true",
+                    extract_images=True,
+                    ocr_enabled=os.getenv("DOCLING_OCR_ENABLED", "true").lower() == "true",
+                    preserve_structure=True,
+                    offline_mode=os.getenv("DOCLING_OFFLINE_MODE", "true").lower() == "true",
+                    cache_dir=os.getenv("DOCLING_CACHE_DIR"),
+                    use_vlm=os.getenv("DOCLING_USE_VLM", "false").lower() == "true",  # VLM off by default
+                )
+                parser_blocks = list(parser.parse(str(tmp_path), doc_id=doc_id))
             else:
-                # Fallback: try OCR for images; else treat as UTF-8 text
-                if content_type.startswith("image/") or suffix in {"png", "jpg", "jpeg", "tif", "tiff"}:
-                    files = {"file": (filename, content, content_type or "application/octet-stream")}
-                    start_ocr = time.time()
-                    try:
-                        ocr_resp = requests.post(OCR_URL, files=files, timeout=180)
-                        ocr_resp.raise_for_status()
-                        raw_text = ocr_resp.json().get("text", "")
-                        LOGGER.info(
-                            "ocr_ok",
-                            extra={"endpoint": OCR_URL, "elapsed_ms": int((time.time() - start_ocr) * 1000)},
-                        )
-                    except Exception:
-                        LOGGER.exception("ocr_failed", extra={"endpoint": OCR_URL})
-                        raw_text = ""
-                else:
-                    raw_text = content.decode("utf-8", errors="ignore")
+                # Fallback for unsupported formats: treat as plain text
+                LOGGER.info("fallback_text_parser", extra={"suffix": suffix, "path": str(tmp_path)})
+                raw_text = content.decode("utf-8", errors="ignore")
                 if raw_text.strip():
                     parser_blocks = [
                         RawBlock(text=raw_text, meta={"doc_id": doc_id, "type": "raw", "path": str(tmp_path)})
@@ -203,7 +187,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             LOGGER.warning("no_blocks filename=%s suffix=%s", filename, suffix)
             raise HTTPException(status_code=400, detail="Parser produced no content")
 
-        # 3) Normalize and chunk each block with rich metadata
+        # 3) Chunk each block with rich metadata (Docling already normalizes text)
         doc_metadata = {
             "doc_id": doc_id,
             "source_uri": filename,
@@ -211,11 +195,11 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         }
         chunk_dicts: list[dict[str, Any]] = []
         for block in parser_blocks:
-            normalized = normalize_text(block.text)
-            if not normalized:
+            # Docling provides pre-cleaned text, no additional normalization needed
+            if not block.text or not block.text.strip():
                 continue
             merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
-            for chunk in chunk_text(normalized, doc_metadata=merged_meta, lang="en"):
+            for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
                 chunk_dicts.append(chunk.to_dict())
 
         if not chunk_dicts:
@@ -223,7 +207,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             raise HTTPException(status_code=400, detail="No chunks produced")
 
         # 4) Deduplicate
-        unique_chunks = deduplicate_chunks(chunk_dicts, threshold=0.85)
+        unique_chunks = deduplicate_chunks(chunk_dicts, threshold=0.99)
         LOGGER.info(
             "chunks_ready",
             extra={

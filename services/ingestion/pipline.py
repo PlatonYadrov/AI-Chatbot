@@ -29,10 +29,10 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional
 
 from .parsers import BaseParser, RawBlock
+from .parsers.docling_parser import DoclingParser
 from .processors.chunker import chunk_text
 from .processors.deduplicator import Deduplicator
 from .processors.metadata_extractor import enrich_metadata
-from .processors.normalizer import normalise_text
 from .processors.pii_redactor import redact_pii
 
 
@@ -47,24 +47,57 @@ class ChunkRecord:
 
 
 class LocalIngestionPipeline:
-    """Utility class to ingest local files using the existing building blocks."""
+    """Utility class to ingest local files using the existing building blocks.
+    
+    Now uses Docling as the default unified parser for all document types.
+    """
 
     def __init__(
         self,
         *,
-        parsers: Mapping[str, BaseParser],
+        parsers: Optional[Mapping[str, BaseParser]] = None,
         embedder,
         indexer: Optional[object] = None,
         chunk_size: int = 1200,
         chunk_overlap: int = 150,
         chunk_strategy: str = "recursive",
         deduplicator: Optional[Deduplicator] = None,
+        use_docling: bool = True,
     ) -> None:
-        if not parsers:
-            raise ValueError("At least one parser must be provided")
-        self.parsers: Dict[str, BaseParser] = {
-            ext.lower().lstrip("."): parser for ext, parser in parsers.items()
-        }
+        """Initialize pipeline.
+        
+        Args:
+            parsers: Optional mapping of file extensions to parsers (if None, uses Docling)
+            embedder: Embedding service
+            indexer: Optional indexer for upserting embeddings
+            chunk_size: Target chunk size in characters
+            chunk_overlap: Overlap between chunks
+            chunk_strategy: Chunking strategy ('recursive', 'token_aware', 'semantic')
+            deduplicator: Deduplicator instance
+            use_docling: If True and parsers is None, use Docling for all formats
+        """
+        if parsers:
+            self.parsers: Dict[str, BaseParser] = {
+                ext.lower().lstrip("."): parser for ext, parser in parsers.items()
+            }
+        elif use_docling:
+            # Use Docling as universal parser
+            docling_parser = DoclingParser(
+                extract_tables=True,
+                extract_images=True,
+                ocr_enabled=True,
+                preserve_structure=True,
+            )
+            # Map all supported formats to Docling
+            supported_exts = [
+                "pdf", "docx", "pptx", "xlsx", "xls", "doc", "ppt",
+                "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif",
+                "html", "htm", "md", "txt"
+            ]
+            self.parsers = {ext: docling_parser for ext in supported_exts}
+        else:
+            raise ValueError("Either parsers or use_docling=True must be provided")
+        
         self.embedder = embedder
         self.indexer = indexer
         self.chunk_size = chunk_size
@@ -84,11 +117,13 @@ class LocalIngestionPipeline:
         chunk_index = 0
 
         for raw_block in parser.parse(str(path), doc_id=doc_id):
-            normalised = normalise_text(raw_block.text)
-            if not normalised:
+            # Docling already provides clean, normalized text
+            # No additional normalization needed
+            if not raw_block.text or not raw_block.text.strip():
                 continue
+            
             chunks = chunk_text(
-                normalised,
+                raw_block.text,
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap,
                 strategy=self.chunk_strategy,
