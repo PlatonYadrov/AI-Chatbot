@@ -74,7 +74,6 @@ class DoclingParser(BaseParser):
         ensure_dependency("docling", "pip install docling")
         from docling.document_converter import DocumentConverter
         from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
-        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
         
         resolved_id = self._resolve_doc_id(path, doc_id)
         path_obj = Path(path)
@@ -92,9 +91,6 @@ class DoclingParser(BaseParser):
         try:
             # Configure pipeline for local operation with ALL Docling models
             pipeline_options = PdfPipelineOptions()
-            
-            # Set backend (required in new Docling API)
-            pipeline_options.backend = PyPdfiumDocumentBackend
             
             # OCR settings (Tesseract + EasyOCR)
             pipeline_options.do_ocr = self.ocr_enabled
@@ -130,6 +126,7 @@ class DoclingParser(BaseParser):
                     LOGGER.warning("Install with: pip install 'docling[vlm]'")
             
             # Initialize converter with all models (new Docling API)
+            # Backend is automatically selected by Docling
             converter = DocumentConverter(
                 format_options={
                     "pdf": pipeline_options,

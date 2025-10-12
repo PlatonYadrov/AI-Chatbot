@@ -28,24 +28,24 @@ def download_models():
     
     # Create a temporary test PDF
     print("\n[1/3] Creating test document...")
+    # Prefer reportlab to avoid heavy PyMuPDF dependency
+    test_pdf = None
     try:
-        import fitz  # PyMuPDF
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            doc = fitz.open()
-            page = doc.new_page()
-            page.insert_text((72, 72), "Test document for model download", fontsize=12)
-            
-            # Add a simple table
-            page.insert_text((72, 150), "Column1    Column2", fontsize=10)
-            page.insert_text((72, 170), "Value1     Value2", fontsize=10)
-            
-            doc.save(tmp.name)
-            doc.close()
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import letter
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False, mode="wb") as tmp:
+            c = canvas.Canvas(tmp.name, pagesize=letter)
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(72, 750, "Test document for model download")
+            c.setFont("Helvetica", 10)
+            c.drawString(72, 720, "Column1    Column2")
+            c.drawString(72, 705, "Value1     Value2")
+            c.save()
             test_pdf = tmp.name
         print(f"✓ Test PDF created: {test_pdf}")
     except Exception as e:
-        print(f"✗ Failed to create test PDF: {e}")
-        print("Using basic conversion without test...")
+        print(f"⚠ Could not generate test PDF (reportlab missing?): {e}")
+        print("Proceeding without test document - models will download on first real parse")
         test_pdf = None
     
     # Configure for full model download
@@ -57,7 +57,12 @@ def download_models():
         pipeline_options.do_ocr = True
         pipeline_options.do_table_structure = True
         
-        converter = DocumentConverter(pipeline_options=pipeline_options)
+        # New Docling API: pass options via format_options
+        converter = DocumentConverter(
+            format_options={
+                "pdf": pipeline_options,
+            }
+        )
         
         if test_pdf:
             print("  Processing test document to trigger model downloads...")

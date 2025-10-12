@@ -96,8 +96,11 @@
 ```python
 from docling.document_converter import DocumentConverter
 
-# При первом запуске загрузит все нужные модели
-converter = DocumentConverter()
+# При первом запуске загрузит все нужные модели (новый API)
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+options = PdfPipelineOptions()
+converter = DocumentConverter(format_options={"pdf": options})
 result = converter.convert("document.pdf")
 ```
 
@@ -144,7 +147,7 @@ options.do_ocr = False  # Без OCR (только текстовый слой)
 options.do_table_structure = True
 options.table_structure_options.mode = TableFormerMode.FAST
 
-converter = DocumentConverter(pipeline_options=options)
+converter = DocumentConverter(format_options={"pdf": options})
 ```
 
 ### С OCR
@@ -179,7 +182,7 @@ options.do_ocr = True
 options.do_table_structure = True
 options.use_vlm = True  # Включить Vision Language Model
 
-converter = DocumentConverter(pipeline_options=options)
+converter = DocumentConverter(format_options={"pdf": options})
 ```
 
 ---
