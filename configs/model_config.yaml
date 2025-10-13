@@ -12,3 +12,11 @@ chunking:
   overlap_tokens: 75
   min_chunk_tokens: 50
   max_chunk_tokens: 512
+
+reranking:
+  model_name: langchain-compression
+  device: auto  # Options: auto, cuda, cpu
+  max_length: 512
+  batch_size: 16
+  enabled: true
+  use_langchain: true  # Use LangChain compression pipeline

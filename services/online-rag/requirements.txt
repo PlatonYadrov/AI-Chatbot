@@ -5,3 +5,11 @@ langchain==0.2.6
 langchain-community==0.2.6
 qdrant-client==1.9.1
 
+# LangChain reranking components (already included in langchain-community)
+# No additional dependencies needed for LangChain-based reranking
+
+# Optional: For advanced reranking with external models
+# sentence-transformers>=2.2.2
+# torch>=1.9.0
+# numpy>=1.21.0
+

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import List
+import logging
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
@@ -11,6 +12,14 @@ from langchain.embeddings.base import Embeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import requests
 from generation.llm_service import generate_response
+
+# Import reranking service
+try:
+    from reranker.cross_encoder_service import rerank_candidates
+    RERANKING_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Reranking not available: {e}")
+    RERANKING_AVAILABLE = False
 
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -48,6 +57,8 @@ class QueryRequest(BaseModel):
     k: int = 4
     include_vectors: bool = False
     vector_top_n: int = 10
+    use_reranking: bool = True
+    rerank_top_k: Optional[int] = None
 
 
 app = FastAPI(title="RAG Gateway")
@@ -63,7 +74,40 @@ def query_endpoint(req: QueryRequest):
         prefer_grpc=False,
         path=None,
     )
-    docs = vs.similarity_search(req.query, k=req.k)
+    
+    # Initial retrieval - get more candidates if reranking is enabled
+    initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
+    docs = vs.similarity_search(req.query, k=initial_k)
+    
+    # Apply reranking if enabled and available
+    if req.use_reranking and RERANKING_AVAILABLE and docs:
+        try:
+            # Convert docs to format expected by reranker
+            candidates = []
+            for d in docs:
+                meta = getattr(d, 'metadata', {})
+                if 'text' not in meta and hasattr(d, 'page_content'):
+                    meta = {**meta, 'text': getattr(d, 'page_content')}
+                candidates.append(meta)
+            
+            # Rerank candidates
+            rerank_k = req.rerank_top_k or req.k
+            reranked_candidates = rerank_candidates(req.query, candidates, top_k=rerank_k)
+            
+            # Update docs with reranked order
+            docs = docs[:len(reranked_candidates)]  # Keep original docs but limit to reranked count
+            
+            logging.info(f"Reranking applied: {len(candidates)} -> {len(reranked_candidates)} candidates")
+            
+        except Exception as e:
+            logging.error(f"Reranking failed, using original order: {e}")
+            # Fallback to original order
+            docs = docs[:req.k]
+    
+    # Limit to requested number if no reranking
+    elif not req.use_reranking or not RERANKING_AVAILABLE:
+        docs = docs[:req.k]
+    
     context = "\n\n".join(d.page_content for d in docs)
     prompt = f"Answer the question using the context.\n\nContext:\n{context}\n\nQuestion: {req.query}"
     answer, thoughts = generate_response(prompt)
