@@ -17,6 +17,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
 from processors.chunker import chunk_text
+from processors.docling_chunker import DoclingChunker, DoclingChunk
 from processors.deduplicator import deduplicate_chunks
 from parsers.docling_parser import DoclingParser
 from parsers.base import RawBlock
@@ -25,6 +26,11 @@ from parsers.base import RawBlock
 OCR_URL = os.getenv("OCR_URL", "http://ocr:9000/ocr")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_chunks")
+
+# Docling Chunking Configuration
+USE_DOCLING_CHUNKING = os.getenv("USE_DOCLING_CHUNKING", "false").lower() == "true"
+MAX_TOKENS = int(os.getenv("CHUNKING_MAX_TOKENS", "512"))
+CHUNK_OVERLAP = int(os.getenv("CHUNKING_OVERLAP", "75"))
 
 
 LOGGER = logging.getLogger("ingestion.api")
@@ -82,6 +88,37 @@ class TEIEmbeddings(Embeddings):
 
 embeddings = TEIEmbeddings()
 client = QdrantClient(url=QDRANT_URL)
+
+# Initialize Docling Chunker (lazy, only if enabled)
+docling_chunker = None
+if USE_DOCLING_CHUNKING:
+    # Auto-detect tokenizer from embeddings model or use explicit config
+    tokenizer = os.getenv("CHUNKING_TOKENIZER")
+    if not tokenizer:
+        embeddings_model = os.getenv("EMBEDDINGS_MODEL", "intfloat/e5-base")
+        if "e5" in embeddings_model or "bert" in embeddings_model.lower() or "bge" in embeddings_model.lower():
+            tokenizer = "bert-base-uncased"  # BERT-based: e5, BGE, BERT
+        elif "gpt" in embeddings_model.lower():
+            tokenizer = "cl100k_base"  # GPT-based
+        else:
+            tokenizer = "bert-base-uncased"  # Default
+    
+    docling_chunker = DoclingChunker(
+        tokenizer=tokenizer,
+        max_tokens=MAX_TOKENS,
+        overlap=CHUNK_OVERLAP,
+        merge_peers=True,
+        include_metadata=True,
+    )
+    LOGGER.info(
+        "docling_chunking_enabled",
+        extra={
+            "max_tokens": MAX_TOKENS,
+            "overlap": CHUNK_OVERLAP,
+            "tokenizer": tokenizer,
+            "embeddings_model": os.getenv("EMBEDDINGS_MODEL", "unknown"),
+        },
+    )
 
 def _ensure_collection():
     try:
@@ -187,20 +224,55 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             LOGGER.warning("no_blocks filename=%s suffix=%s", filename, suffix)
             raise HTTPException(status_code=400, detail="Parser produced no content")
 
-        # 3) Chunk each block with rich metadata (Docling already normalizes text)
+        # 3) Chunk with Docling HybridChunker (structure-aware) or traditional chunking
         doc_metadata = {
             "doc_id": doc_id,
             "source_uri": filename,
             "source_type": suffix or "upload",
         }
         chunk_dicts: list[dict[str, Any]] = []
-        for block in parser_blocks:
-            # Docling provides pre-cleaned text, no additional normalization needed
-            if not block.text or not block.text.strip():
-                continue
-            merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
-            for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
-                chunk_dicts.append(chunk.to_dict())
+        
+        # Strategy 1: Docling HybridChunker (structure-aware, recommended)
+        if USE_DOCLING_CHUNKING and docling_chunker and suffix in supported_formats:
+            try:
+                # Get DoclingDocument for structure-aware chunking
+                docling_doc = parser.parse_to_document(str(tmp_path), doc_id=doc_id)
+                
+                # Use HybridChunker to create structure-aware chunks
+                docling_chunks = docling_chunker.chunk_document(
+                    docling_doc,
+                    doc_metadata=doc_metadata,
+                )
+                
+                for chunk in docling_chunks:
+                    chunk_dicts.append(chunk.to_dict())
+                
+                LOGGER.info(
+                    "docling_chunking_complete",
+                    extra={"doc_id": doc_id, "chunks": len(chunk_dicts), "strategy": "hybrid"},
+                )
+            except Exception as e:
+                # Fallback to traditional chunking on error
+                LOGGER.warning(
+                    "docling_chunking_fallback",
+                    extra={"doc_id": doc_id, "error": str(e)},
+                )
+                USE_DOCLING_CHUNKING = False  # Disable for this request
+        
+        # Strategy 2: Traditional chunking (fallback or default)
+        if not chunk_dicts:
+            for block in parser_blocks:
+                # Docling provides pre-cleaned text, no additional normalization needed
+                if not block.text or not block.text.strip():
+                    continue
+                merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
+                for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
+                    chunk_dicts.append(chunk.to_dict())
+            
+            LOGGER.info(
+                "traditional_chunking_complete",
+                extra={"doc_id": doc_id, "chunks": len(chunk_dicts), "strategy": "traditional"},
+            )
 
         if not chunk_dicts:
             LOGGER.warning("no_chunks doc_id=%s filename=%s", doc_id, filename)

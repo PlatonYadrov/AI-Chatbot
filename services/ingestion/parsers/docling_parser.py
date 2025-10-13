@@ -61,6 +61,69 @@ class DoclingParser(BaseParser):
             os.environ["HF_HOME"] = self.cache_dir
             os.environ["TRANSFORMERS_CACHE"] = self.cache_dir
 
+    def parse_to_document(self, path: str, *, doc_id: Optional[str] = None):
+        """Parse document and return DoclingDocument for advanced processing.
+        
+        This method returns the raw DoclingDocument which can be used with
+        Docling's HybridChunker for structure-aware chunking.
+        
+        Args:
+            path: Path to document file
+            doc_id: Optional document identifier
+            
+        Returns:
+            DoclingDocument object
+        """
+        ensure_dependency("docling", "pip install docling")
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
+        from docling.datamodel.base_models import InputFormat
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+        
+        resolved_id = self._resolve_doc_id(path, doc_id)
+        path_obj = Path(path)
+        
+        LOGGER.info(
+            "docling_parse_to_document",
+            extra={
+                "doc_id": resolved_id,
+                "path": str(path),
+                "suffix": path_obj.suffix,
+            },
+        )
+        
+        # Configure pipeline (same as parse method)
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = self.ocr_enabled
+        pipeline_options.do_table_structure = self.extract_tables
+        
+        if self.extract_tables:
+            pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+            pipeline_options.table_structure_options.do_cell_matching = True
+        
+        if self.extract_images:
+            pipeline_options.images_scale = 2.0
+            pipeline_options.generate_page_images = True
+            pipeline_options.generate_picture_images = True
+        
+        if self.use_vlm:
+            try:
+                pipeline_options.use_vlm = True
+                LOGGER.info("VLM enabled for image understanding")
+            except Exception as e:
+                LOGGER.warning(f"VLM not available: {e}")
+        
+        pdf_fmt_option = PdfFormatOption(
+            pipeline_options=pipeline_options,
+            backend=PyPdfiumDocumentBackend,
+        )
+        converter = DocumentConverter(
+            format_options={InputFormat.PDF: pdf_fmt_option}
+        )
+        
+        result = converter.convert(str(path))
+        return result.document
+    
     def parse(self, path: str, *, doc_id: Optional[str] = None) -> Iterator[RawBlock]:
         """Parse document using Docling and yield structured blocks.
         

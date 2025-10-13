@@ -31,6 +31,7 @@ from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional
 from .parsers import BaseParser, RawBlock
 from .parsers.docling_parser import DoclingParser
 from .processors.chunker import chunk_text
+from .processors.docling_chunker import DoclingChunker, DoclingChunk
 from .processors.deduplicator import Deduplicator
 from .processors.metadata_extractor import enrich_metadata
 from .processors.pii_redactor import redact_pii
@@ -63,6 +64,8 @@ class LocalIngestionPipeline:
         chunk_strategy: str = "recursive",
         deduplicator: Optional[Deduplicator] = None,
         use_docling: bool = True,
+        use_docling_chunking: bool = False,
+        max_tokens: int = 512,
     ) -> None:
         """Initialize pipeline.
         
@@ -72,9 +75,11 @@ class LocalIngestionPipeline:
             indexer: Optional indexer for upserting embeddings
             chunk_size: Target chunk size in characters
             chunk_overlap: Overlap between chunks
-            chunk_strategy: Chunking strategy ('recursive', 'token_aware', 'semantic')
+            chunk_strategy: Chunking strategy ('recursive', 'token_aware', 'semantic', 'docling_hybrid')
             deduplicator: Deduplicator instance
             use_docling: If True and parsers is None, use Docling for all formats
+            use_docling_chunking: If True, use Docling's HybridChunker (structure-aware)
+            max_tokens: Maximum tokens per chunk (for Docling chunking)
         """
         if parsers:
             self.parsers: Dict[str, BaseParser] = {
@@ -104,6 +109,17 @@ class LocalIngestionPipeline:
         self.chunk_overlap = chunk_overlap
         self.chunk_strategy = chunk_strategy
         self.deduplicator = deduplicator or Deduplicator()
+        self.use_docling_chunking = use_docling_chunking
+        self.max_tokens = max_tokens
+        
+        # Initialize Docling chunker if enabled
+        if self.use_docling_chunking:
+            self.docling_chunker = DoclingChunker(
+                max_tokens=self.max_tokens,
+                overlap=self.chunk_overlap,
+                merge_peers=True,
+                include_metadata=True,
+            )
 
     def ingest_path(self, path: str | Path, *, doc_id: Optional[str] = None) -> List[ChunkRecord]:
         """Ingest a single file returning the generated chunk records."""
@@ -113,6 +129,82 @@ class LocalIngestionPipeline:
         if parser is None:
             return []
 
+        # Use Docling-native chunking if enabled and parser supports it
+        if self.use_docling_chunking and isinstance(parser, DoclingParser):
+            return self._ingest_with_docling_chunking(path, parser, doc_id)
+        
+        # Otherwise, use traditional chunking
+        return self._ingest_with_traditional_chunking(path, parser, doc_id)
+    
+    def _ingest_with_docling_chunking(
+        self,
+        path: Path,
+        parser: DoclingParser,
+        doc_id: Optional[str],
+    ) -> List[ChunkRecord]:
+        """Ingest using Docling's structure-aware HybridChunker."""
+        
+        # Get DoclingDocument directly
+        docling_doc = parser.parse_to_document(str(path), doc_id=doc_id)
+        
+        # Prepare metadata
+        resolved_id = doc_id or path.stem
+        doc_metadata = {
+            "doc_id": resolved_id,
+            "path": str(path),
+            "source_type": "docling",
+        }
+        
+        # Use HybridChunker to split document
+        docling_chunks = self.docling_chunker.chunk_document(
+            docling_doc,
+            doc_metadata=doc_metadata,
+        )
+        
+        # Convert to RawBlocks for compatibility with existing pipeline
+        prepared_blocks: List[RawBlock] = []
+        for chunk in docling_chunks:
+            # Apply PII redaction
+            redacted_text = redact_pii(chunk.text)
+            
+            # Enrich metadata
+            enriched_meta = enrich_metadata(chunk.meta, redacted_text)
+            
+            prepared_blocks.append(RawBlock(text=redacted_text, meta=enriched_meta))
+        
+        # Deduplicate
+        unique_blocks = list(self.deduplicator.filter_blocks(prepared_blocks))
+        if not unique_blocks:
+            return []
+        
+        # Embed and index
+        vectors = self.embedder.embed_passages([block.text for block in unique_blocks])
+        records = []
+        points = []
+        for block, vector in zip(unique_blocks, vectors):
+            vector_list = _vector_to_list(vector)
+            payload = dict(block.meta)
+            payload.setdefault("text", block.text)
+            point_id = _make_point_id(payload, block.text)
+            record = ChunkRecord(id=point_id, text=block.text, vector=vector_list, payload=payload)
+            records.append(record)
+            points.append({"id": point_id, "vector": vector_list, "payload": payload})
+        
+        if self.indexer is not None:
+            upsert = getattr(self.indexer, "upsert_embeddings", None)
+            if callable(upsert):
+                upsert(points)
+        
+        return records
+    
+    def _ingest_with_traditional_chunking(
+        self,
+        path: Path,
+        parser: BaseParser,
+        doc_id: Optional[str],
+    ) -> List[ChunkRecord]:
+        """Ingest using traditional text-based chunking."""
+        
         prepared_blocks: List[RawBlock] = []
         chunk_index = 0
 

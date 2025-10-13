@@ -21,6 +21,11 @@ services:
       - TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/
       # VLM disabled by default - uncomment if you have spare VRAM
       # - CUDA_VISIBLE_DEVICES=1
+      # Docling Chunking (structure-aware) - set to true for better RAG quality
+      - USE_DOCLING_CHUNKING=false
+      - CHUNKING_MAX_TOKENS=512
+      - CHUNKING_OVERLAP=75
+      # - CHUNKING_TOKENIZER=bert-base-uncased  # Auto-detected from EMBEDDINGS_MODEL
     # deploy:  # VLM disabled to save VRAM for vLLM
     #   resources:
     #     reservations:
