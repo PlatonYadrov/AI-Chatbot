@@ -280,7 +280,8 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             raise HTTPException(status_code=400, detail="No chunks produced")
 
         # 4) Deduplicate
-        unique_chunks = deduplicate_chunks(chunk_dicts, threshold=0.99)
+        # unique_chunks = deduplicate_chunks(chunk_dicts, threshold=0.99)
+        unique_chunks = chunk_dicts
         LOGGER.info(
             "chunks_ready",
             extra={

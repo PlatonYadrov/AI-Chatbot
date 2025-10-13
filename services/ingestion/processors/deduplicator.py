@@ -45,7 +45,10 @@ def deduplicate_chunks(chunks: List[Dict[str, Any]], threshold: float = 0.8) -> 
         LOGGER.info("dedup_fallback_exact")
         return _exact_hash_dedup(chunks)
     
-    lsh = MinHashLSH(threshold=threshold, num_perm=128)
+    # Lower threshold or increase num_perm to avoid "bands too small" error
+    # threshold=0.99 is too high for num_perm=128
+    effective_threshold = min(threshold, 0.95)  # Cap at 0.95
+    lsh = MinHashLSH(threshold=effective_threshold, num_perm=128)
     unique_chunks: List[Dict[str, Any]] = []
     seen_ids: Set[str] = set()
     
