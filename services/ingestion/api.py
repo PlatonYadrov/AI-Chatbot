@@ -233,7 +233,8 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         chunk_dicts: list[dict[str, Any]] = []
         
         # Strategy 1: Docling HybridChunker (structure-aware, recommended)
-        if USE_DOCLING_CHUNKING and docling_chunker and suffix in supported_formats:
+        use_hybrid_chunking = USE_DOCLING_CHUNKING and docling_chunker and suffix in supported_formats
+        if use_hybrid_chunking:
             try:
                 # Get DoclingDocument for structure-aware chunking
                 docling_doc = parser.parse_to_document(str(tmp_path), doc_id=doc_id)
@@ -257,7 +258,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                     "docling_chunking_fallback",
                     extra={"doc_id": doc_id, "error": str(e)},
                 )
-                USE_DOCLING_CHUNKING = False  # Disable for this request
+                use_hybrid_chunking = False  # Disable for this request
         
         # Strategy 2: Traditional chunking (fallback or default)
         if not chunk_dicts:
