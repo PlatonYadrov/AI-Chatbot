@@ -295,15 +295,17 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         _ensure_collection()
         
         # Truncate texts to max model context length
-        # BGE-M3: 8192 tokens ≈ 32768 chars
-        # e5-base: 512 tokens ≈ 2048 chars
         embeddings_model = os.getenv("EMBEDDINGS_MODEL", "intfloat/e5-base")
         if "bge-m3" in embeddings_model.lower():
-            MAX_CHARS = 32768  # BGE-M3 supports 8192 tokens
+            MAX_CHARS = 32768  # BGE-M3: 8192 tokens
+        elif "bge" in embeddings_model.lower():
+            MAX_CHARS = 2048  # BGE-base/large: 512 tokens
+        elif "e5-large" in embeddings_model.lower() or "e5-base" in embeddings_model.lower():
+            MAX_CHARS = 2048  # e5-base/large: 512 tokens
         elif "mistral" in embeddings_model.lower():
-            MAX_CHARS = 131072  # e5-mistral supports 32768 tokens
+            MAX_CHARS = 131072  # e5-mistral: 32768 tokens
         else:
-            MAX_CHARS = 2048  # Default: e5-base (512 tokens)
+            MAX_CHARS = 2048  # Default: 512 tokens
         texts = []
         for c in unique_chunks:
             text = c["text"]

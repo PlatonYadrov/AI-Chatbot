@@ -23,8 +23,8 @@ services:
       # - CUDA_VISIBLE_DEVICES=1
       # Docling Chunking (structure-aware) - set to true for better RAG quality
       - USE_DOCLING_CHUNKING=false
-      - CHUNKING_MAX_TOKENS=512
-      - CHUNKING_OVERLAP=75
+      - CHUNKING_MAX_TOKENS=450   # multilingual-e5-large: 512 tokens limit
+      - CHUNKING_OVERLAP=100
       # - CHUNKING_TOKENIZER=bert-base-uncased  # Auto-detected from EMBEDDINGS_MODEL
     # deploy:  # VLM disabled to save VRAM for vLLM
     #   resources:
@@ -93,9 +93,9 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=1  # Use GPU 1 (L4)
     command: >-
-      --model-id BAAI/bge-m3
+      --model-id intfloat/multilingual-e5-large
       --dtype float16
-      --max-batch-tokens 32768
+      --max-batch-tokens 16384
     ports:
       - "8080:80"
     volumes:
