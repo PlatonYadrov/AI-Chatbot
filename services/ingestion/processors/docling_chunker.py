@@ -21,9 +21,7 @@ LOGGER = logging.getLogger(__name__)
 # ВАЖНО: импорт отделяем от конструирования
 try:
     from docling.chunking import HybridChunker
-    # оба варианта токенизаторов доступны в docling-core
     from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
-    from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
     from transformers import AutoTokenizer
     DOCLING_CHUNKING_AVAILABLE = True
     LOGGER.info("docling_chunking_import_ok")
@@ -65,10 +63,10 @@ class DoclingChunker:
         """Initialize Docling chunker.
         
         Args:
-            tokenizer: Tokenizer name (HuggingFace model ID or OpenAI model)
-                       - "intfloat/multilingual-e5-large" (default, for embeddings)
+            tokenizer: HuggingFace model ID for tokenizer
+                       - "intfloat/multilingual-e5-large" (default, matches embeddings)
                        - "bert-base-uncased" for BERT models
-                       - "cl100k_base" or "text-embedding-3-large" for OpenAI
+                       - любой HuggingFace model ID
             max_tokens: Maximum tokens per chunk
             overlap: Token overlap between chunks (manual overlap, HybridChunker doesn't use it)
             merge_peers: Merge small adjacent chunks for better context
@@ -85,20 +83,9 @@ class DoclingChunker:
     
     def _build_tokenizer(self):
         """
-        Создаёт корректный объект токенизатора для HybridChunker.
-        - Для HF: HuggingFaceTokenizer(AutoTokenizer(...), max_tokens=...)
-        - Для OpenAI: OpenAITokenizer(model=..., max_tokens=...)
+        Создаёт объект HuggingFace токенизатора для HybridChunker.
+        Загружает токенизатор из HuggingFace Hub по model ID.
         """
-        name = (self.tokenizer_name or "").lower()
-
-        # OpenAI-варианты (если вы хотите использовать cl100k_base или явные openai-модели)
-        if name in {"cl100k_base", "text-embedding-3-small", "text-embedding-3-large"} or name.startswith("text-embedding-"):
-            return OpenAITokenizer(
-                model="text-embedding-3-large" if name == "cl100k_base" else self.tokenizer_name,
-                max_tokens=self.max_tokens,
-            )
-
-        # По умолчанию — HuggingFace
         hf_tok = AutoTokenizer.from_pretrained(self.tokenizer_name)
         return HuggingFaceTokenizer(tokenizer=hf_tok, max_tokens=self.max_tokens)
 
@@ -236,7 +223,7 @@ def chunk_docling_document(
         doc_metadata: Additional metadata to include in chunks
         max_tokens: Maximum tokens per chunk
         overlap: Token overlap between chunks
-        tokenizer: Tokenizer name (HuggingFace model ID or OpenAI model)
+        tokenizer: HuggingFace model ID for tokenizer
         
     Returns:
         List of DoclingChunk objects
