@@ -74,7 +74,7 @@ class DoclingChunker:
         """Lazy load HybridChunker."""
         if self._chunker is None:
             try:
-                from docling_core.transforms.chunker import HybridChunker
+                from docling.chunking import HybridChunker
                 
                 self._chunker = HybridChunker(
                     tokenizer=self.tokenizer,
@@ -95,7 +95,7 @@ class DoclingChunker:
                     extra={"error": str(e)},
                 )
                 raise ImportError(
-                    "HybridChunker not available. Install with: pip install 'docling-core[chunking]'"
+                    "HybridChunker not available. Install with: pip install 'docling[chunking]'"
                 ) from e
         
         return self._chunker
