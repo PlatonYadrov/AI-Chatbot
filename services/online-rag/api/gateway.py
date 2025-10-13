@@ -30,63 +30,71 @@ QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_chunks")
 class CustomQdrant(Qdrant):
     """Кастомный Qdrant класс для работы с нашей структурой данных."""
     
-    def _document_from_scored_point(self, scored_point):
+    def _document_from_scored_point(self, scored_point, score_threshold=None, **kwargs):
         """Переопределяем метод для правильной обработки нашей структуры."""
-        payload = scored_point.payload
-        
-        # Ищем текст в разных полях
-        text_content = None
-        if payload:
-            # Приоритет полей для текста
-            text_content = (payload.get('text') or 
-                          payload.get('enriched_text') or 
-                          payload.get('content'))
-        
-        # Если текста нет, пропускаем документ
-        if not text_content or not text_content.strip():
+        try:
+            payload = scored_point.payload
+            
+            # Ищем текст в разных полях
+            text_content = None
+            if payload:
+                # Приоритет полей для текста
+                text_content = (payload.get('text') or 
+                              payload.get('enriched_text') or 
+                              payload.get('content'))
+            
+            # Если текста нет, пропускаем документ
+            if not text_content or not text_content.strip():
+                return None
+            
+            # Создаем metadata без текстовых полей
+            metadata = {}
+            if payload:
+                for key, value in payload.items():
+                    if key not in ['text', 'enriched_text', 'content']:
+                        metadata[key] = value
+            
+            # Создаем Document с правильным page_content
+            return Document(
+                page_content=text_content,
+                metadata=metadata
+            )
+        except Exception as e:
+            logging.error(f"Error in _document_from_scored_point: {e}")
             return None
-        
-        # Создаем metadata без текстовых полей
-        metadata = {}
-        if payload:
-            for key, value in payload.items():
-                if key not in ['text', 'enriched_text', 'content']:
-                    metadata[key] = value
-        
-        # Создаем Document с правильным page_content
-        return Document(
-            page_content=text_content,
-            metadata=metadata
-        )
     
-    def _document_from_point(self, point):
+    def _document_from_point(self, point, **kwargs):
         """Переопределяем метод для правильной обработки нашей структуры."""
-        payload = point.payload
-        
-        # Ищем текст в разных полях
-        text_content = None
-        if payload:
-            # Приоритет полей для текста
-            text_content = (payload.get('text') or 
-                          payload.get('enriched_text') or 
-                          payload.get('content'))
-        
-        # Если текста нет, пропускаем документ
-        if not text_content or not text_content.strip():
+        try:
+            payload = point.payload
+            
+            # Ищем текст в разных полях
+            text_content = None
+            if payload:
+                # Приоритет полей для текста
+                text_content = (payload.get('text') or 
+                              payload.get('enriched_text') or 
+                              payload.get('content'))
+            
+            # Если текста нет, пропускаем документ
+            if not text_content or not text_content.strip():
+                return None
+            
+            # Создаем metadata без текстовых полей
+            metadata = {}
+            if payload:
+                for key, value in payload.items():
+                    if key not in ['text', 'enriched_text', 'content']:
+                        metadata[key] = value
+            
+            # Создаем Document с правильным page_content
+            return Document(
+                page_content=text_content,
+                metadata=metadata
+            )
+        except Exception as e:
+            logging.error(f"Error in _document_from_point: {e}")
             return None
-        
-        # Создаем metadata без текстовых полей
-        metadata = {}
-        if payload:
-            for key, value in payload.items():
-                if key not in ['text', 'enriched_text', 'content']:
-                    metadata[key] = value
-        
-        # Создаем Document с правильным page_content
-        return Document(
-            page_content=text_content,
-            metadata=metadata
-        )
 
 
 class TEIEmbeddings(Embeddings):
