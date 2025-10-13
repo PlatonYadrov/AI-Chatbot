@@ -93,15 +93,11 @@ client = QdrantClient(url=QDRANT_URL)
 docling_chunker = None
 if USE_DOCLING_CHUNKING:
     # Auto-detect tokenizer from embeddings model or use explicit config
+    # ВАЖНО: теперь передаём HuggingFace model ID напрямую, не превращая в "bert-base-uncased"
     tokenizer = os.getenv("CHUNKING_TOKENIZER")
     if not tokenizer:
-        embeddings_model = os.getenv("EMBEDDINGS_MODEL", "intfloat/e5-base")
-        if "e5" in embeddings_model or "bert" in embeddings_model.lower() or "bge" in embeddings_model.lower():
-            tokenizer = "bert-base-uncased"  # BERT-based: e5, BGE, BERT
-        elif "gpt" in embeddings_model.lower():
-            tokenizer = "cl100k_base"  # GPT-based
-        else:
-            tokenizer = "bert-base-uncased"  # Default
+        # Используем тот же токенизатор, что и для эмбеддингов (для согласованности)
+        tokenizer = os.getenv("EMBEDDINGS_MODEL", "intfloat/multilingual-e5-large")
     
     docling_chunker = DoclingChunker(
         tokenizer=tokenizer,

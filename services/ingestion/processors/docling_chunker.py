@@ -18,6 +18,19 @@ from dataclasses import dataclass
 
 LOGGER = logging.getLogger(__name__)
 
+# ВАЖНО: импорт отделяем от конструирования
+try:
+    from docling.chunking import HybridChunker
+    # оба варианта токенизаторов доступны в docling-core
+    from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
+    from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
+    from transformers import AutoTokenizer
+    DOCLING_CHUNKING_AVAILABLE = True
+    LOGGER.info("docling_chunking_import_ok")
+except Exception as e:
+    DOCLING_CHUNKING_AVAILABLE = False
+    LOGGER.error("docling_chunker_import_failed", exc_info=True)
+
 
 @dataclass
 class DoclingChunk:
@@ -43,25 +56,25 @@ class DoclingChunker:
     def __init__(
         self,
         *,
-        tokenizer: str = "bert-base-uncased",
+        tokenizer: str = "intfloat/multilingual-e5-large",  # по умолчанию HF-эмбеддер
         max_tokens: int = 512,
-        overlap: int = 75,
+        overlap: int = 0,               # HybridChunker обычно работает без оверлапа
         merge_peers: bool = True,
         include_metadata: bool = True,
     ) -> None:
         """Initialize Docling chunker.
         
         Args:
-            tokenizer: Tokenizer name for HybridChunker
-                       - "bert-base-uncased" for BERT/e5/BGE models (default)
-                       - "cl100k_base" for GPT-3.5/4
-                       - "gpt2" for GPT-2
+            tokenizer: Tokenizer name (HuggingFace model ID or OpenAI model)
+                       - "intfloat/multilingual-e5-large" (default, for embeddings)
+                       - "bert-base-uncased" for BERT models
+                       - "cl100k_base" or "text-embedding-3-large" for OpenAI
             max_tokens: Maximum tokens per chunk
-            overlap: Token overlap between chunks
+            overlap: Token overlap between chunks (manual overlap, HybridChunker doesn't use it)
             merge_peers: Merge small adjacent chunks for better context
             include_metadata: Include document structure metadata in chunks
         """
-        self.tokenizer = tokenizer
+        self.tokenizer_name = tokenizer
         self.max_tokens = max_tokens
         self.overlap = overlap
         self.merge_peers = merge_peers
@@ -70,33 +83,49 @@ class DoclingChunker:
         # Lazy initialization - only import when needed
         self._chunker = None
     
+    def _build_tokenizer(self):
+        """
+        Создаёт корректный объект токенизатора для HybridChunker.
+        - Для HF: HuggingFaceTokenizer(AutoTokenizer(...), max_tokens=...)
+        - Для OpenAI: OpenAITokenizer(model=..., max_tokens=...)
+        """
+        name = (self.tokenizer_name or "").lower()
+
+        # OpenAI-варианты (если вы хотите использовать cl100k_base или явные openai-модели)
+        if name in {"cl100k_base", "text-embedding-3-small", "text-embedding-3-large"} or name.startswith("text-embedding-"):
+            return OpenAITokenizer(
+                model="text-embedding-3-large" if name == "cl100k_base" else self.tokenizer_name,
+                max_tokens=self.max_tokens,
+            )
+
+        # По умолчанию — HuggingFace
+        hf_tok = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        return HuggingFaceTokenizer(tokenizer=hf_tok, max_tokens=self.max_tokens)
+
     def _get_chunker(self):
         """Lazy load HybridChunker."""
         if self._chunker is None:
+            if not DOCLING_CHUNKING_AVAILABLE:
+                raise RuntimeError("Docling chunker unavailable (import failed earlier).")
+
             try:
-                from docling.chunking import HybridChunker
-                
+                tokenizer_obj = self._build_tokenizer()
                 self._chunker = HybridChunker(
-                    tokenizer=self.tokenizer,
-                    max_tokens=self.max_tokens,
+                    tokenizer=tokenizer_obj,
                     merge_peers=self.merge_peers,
                 )
                 LOGGER.info(
                     "docling_chunker_initialized",
                     extra={
-                        "tokenizer": self.tokenizer,
+                        "tokenizer": self.tokenizer_name,
                         "max_tokens": self.max_tokens,
+                        "merge_peers": self.merge_peers,
                         "overlap": self.overlap,
                     },
                 )
-            except ImportError as e:
-                LOGGER.error(
-                    "docling_chunker_import_failed",
-                    extra={"error": str(e)},
-                )
-                raise ImportError(
-                    "HybridChunker not available. Install with: pip install 'docling[chunking]'"
-                ) from e
+            except Exception:
+                LOGGER.error("docling_chunker_init_failed", exc_info=True)
+                raise
         
         return self._chunker
     
@@ -117,58 +146,38 @@ class DoclingChunker:
         chunker = self._get_chunker()
         doc_metadata = doc_metadata or {}
         
+        chunks: List[DoclingChunk] = []
         try:
-            chunks: List[DoclingChunk] = []
-            chunk_index = 0
-            
-            # Use HybridChunker to split document
-            # It returns an iterator of chunk items
-            for chunk_item in chunker.chunk(docling_doc):
-                # Extract text and metadata from chunk
-                chunk_text = chunk_item.text if hasattr(chunk_item, 'text') else str(chunk_item)
-                
-                if not chunk_text or not chunk_text.strip():
+            for i, ch in enumerate(chunker.chunk(dl_doc=docling_doc)):
+                text = getattr(ch, "text", str(ch)).strip()
+                if not text:
                     continue
-                
-                # Build metadata for this chunk
-                chunk_meta = {
+
+                # обогащённый текст для эмбеддинга (с заголовками/подписями)
+                try:
+                    enriched = chunker.contextualize(ch)
+                except Exception:
+                    enriched = text
+
+                meta = {
                     **doc_metadata,
-                    "chunk_index": chunk_index,
+                    "chunk_index": i,
                     "chunking_strategy": "docling_hybrid",
+                    "enriched_text": enriched,
                 }
-                
-                # Add structural metadata if available
-                if self.include_metadata and hasattr(chunk_item, 'meta'):
-                    chunk_meta.update(chunk_item.meta)
-                
-                # Try to extract heading context
-                if hasattr(chunk_item, 'headings'):
-                    chunk_meta["headings"] = chunk_item.headings
-                
-                # Try to extract page numbers
-                if hasattr(chunk_item, 'page_no'):
-                    chunk_meta["page"] = chunk_item.page_no
-                elif hasattr(chunk_item, 'pages'):
-                    chunk_meta["pages"] = chunk_item.pages
-                
-                chunks.append(DoclingChunk(text=chunk_text, meta=chunk_meta))
-                chunk_index += 1
-            
-            LOGGER.info(
-                "docling_chunking_complete",
-                extra={
-                    "doc_id": doc_metadata.get("doc_id", "unknown"),
-                    "chunks": len(chunks),
-                },
-            )
-            
+
+                # переносим полезные поля, если есть
+                for k in ("headings", "caption", "element_type", "page_no", "pages"):
+                    if hasattr(ch, k):
+                        meta[k] = getattr(ch, k)
+
+                chunks.append(DoclingChunk(text=text, meta=meta))
+
+            LOGGER.info("docling_chunking_complete", extra={"chunks": len(chunks)})
             return chunks
-            
-        except Exception as exc:
-            LOGGER.exception(
-                "docling_chunking_failed",
-                extra={"doc_id": doc_metadata.get("doc_id", "unknown")},
-            )
+
+        except Exception:
+            LOGGER.exception("docling_chunking_failed")
             raise
     
     def chunk_document_lazy(
@@ -187,41 +196,29 @@ class DoclingChunker:
         """
         chunker = self._get_chunker()
         doc_metadata = doc_metadata or {}
-        
         try:
-            chunk_index = 0
-            
-            for chunk_item in chunker.chunk(docling_doc):
-                chunk_text = chunk_item.text if hasattr(chunk_item, 'text') else str(chunk_item)
-                
-                if not chunk_text or not chunk_text.strip():
+            for i, ch in enumerate(chunker.chunk(dl_doc=docling_doc)):
+                text = getattr(ch, "text", str(ch)).strip()
+                if not text:
                     continue
-                
-                chunk_meta = {
+                try:
+                    enriched = chunker.contextualize(ch)
+                except Exception:
+                    enriched = text
+
+                meta = {
                     **doc_metadata,
-                    "chunk_index": chunk_index,
+                    "chunk_index": i,
                     "chunking_strategy": "docling_hybrid",
+                    "enriched_text": enriched,
                 }
-                
-                if self.include_metadata and hasattr(chunk_item, 'meta'):
-                    chunk_meta.update(chunk_item.meta)
-                
-                if hasattr(chunk_item, 'headings'):
-                    chunk_meta["headings"] = chunk_item.headings
-                
-                if hasattr(chunk_item, 'page_no'):
-                    chunk_meta["page"] = chunk_item.page_no
-                elif hasattr(chunk_item, 'pages'):
-                    chunk_meta["pages"] = chunk_item.pages
-                
-                yield DoclingChunk(text=chunk_text, meta=chunk_meta)
-                chunk_index += 1
-                
-        except Exception as exc:
-            LOGGER.exception(
-                "docling_chunking_failed",
-                extra={"doc_id": doc_metadata.get("doc_id", "unknown")},
-            )
+                for k in ("headings", "caption", "element_type", "page_no", "pages"):
+                    if hasattr(ch, k):
+                        meta[k] = getattr(ch, k)
+
+                yield DoclingChunk(text=text, meta=meta)
+        except Exception:
+            LOGGER.exception("docling_chunking_failed")
             raise
 
 
@@ -229,7 +226,8 @@ def chunk_docling_document(
     docling_doc,
     doc_metadata: Optional[Dict[str, Any]] = None,
     max_tokens: int = 512,
-    overlap: int = 75,
+    overlap: int = 0,
+    tokenizer: str = "intfloat/multilingual-e5-large",
 ) -> List[DoclingChunk]:
     """Convenience function to chunk a Docling document.
     
@@ -238,15 +236,16 @@ def chunk_docling_document(
         doc_metadata: Additional metadata to include in chunks
         max_tokens: Maximum tokens per chunk
         overlap: Token overlap between chunks
+        tokenizer: Tokenizer name (HuggingFace model ID or OpenAI model)
         
     Returns:
         List of DoclingChunk objects
     """
-    chunker = DoclingChunker(
+    return DoclingChunker(
+        tokenizer=tokenizer,
         max_tokens=max_tokens,
         overlap=overlap,
-    )
-    return chunker.chunk_document(docling_doc, doc_metadata)
+    ).chunk_document(docling_doc, doc_metadata)
 
 
 __all__ = ["DoclingChunker", "DoclingChunk", "chunk_docling_document"]

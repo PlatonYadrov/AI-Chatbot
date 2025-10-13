@@ -66,6 +66,7 @@ class LocalIngestionPipeline:
         use_docling: bool = True,
         use_docling_chunking: bool = False,
         max_tokens: int = 512,
+        tokenizer: str = "intfloat/multilingual-e5-large",
     ) -> None:
         """Initialize pipeline.
         
@@ -80,6 +81,7 @@ class LocalIngestionPipeline:
             use_docling: If True and parsers is None, use Docling for all formats
             use_docling_chunking: If True, use Docling's HybridChunker (structure-aware)
             max_tokens: Maximum tokens per chunk (for Docling chunking)
+            tokenizer: Tokenizer name (HuggingFace model ID) for Docling chunking
         """
         if parsers:
             self.parsers: Dict[str, BaseParser] = {
@@ -111,10 +113,12 @@ class LocalIngestionPipeline:
         self.deduplicator = deduplicator or Deduplicator()
         self.use_docling_chunking = use_docling_chunking
         self.max_tokens = max_tokens
+        self.tokenizer = tokenizer
         
         # Initialize Docling chunker if enabled
         if self.use_docling_chunking:
             self.docling_chunker = DoclingChunker(
+                tokenizer=self.tokenizer,
                 max_tokens=self.max_tokens,
                 overlap=self.chunk_overlap,
                 merge_peers=True,

@@ -25,7 +25,7 @@ services:
       - USE_DOCLING_CHUNKING=true
       - CHUNKING_MAX_TOKENS=450   # multilingual-e5-large: 512 tokens limit
       - CHUNKING_OVERLAP=100
-      # - CHUNKING_TOKENIZER=bert-base-uncased  # Auto-detected from EMBEDDINGS_MODEL
+      # - CHUNKING_TOKENIZER=intfloat/multilingual-e5-large  # Auto-detected from EMBEDDINGS_MODEL
     # deploy:  # VLM disabled to save VRAM for vLLM
     #   resources:
     #     reservations:
