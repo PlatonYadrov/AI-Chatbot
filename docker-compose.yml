@@ -90,7 +90,6 @@ services:
               capabilities: [gpu]
   embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:cuda-sha-a593f66
-    runtime: nvidia  # Alternative GPU config
     environment:
       - CUDA_VISIBLE_DEVICES=1  # Use GPU 1 (L4)
       - NVIDIA_VISIBLE_DEVICES=1

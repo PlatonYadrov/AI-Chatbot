@@ -51,7 +51,7 @@ class TEIEmbeddings(Embeddings):
     def _embed(self, texts: List[str]) -> List[List[float]]:
         start_ts = time.time()
         try:
-            resp = requests.post(f"{self.base_url}/embed", json={"inputs": texts}, timeout=60)
+            resp = requests.post(f"{self.base_url}/embed", json={"inputs": texts}, timeout=180)
             resp.raise_for_status()
             payload = resp.json()
             # TEI may return one of:
@@ -304,8 +304,8 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             start_qdrant = time.time()
             
             # Batch embeddings to avoid exceeding TEI max_client_batch_size
-            # TEI on CPU has max_client_batch_size=32
-            batch_size = 32
+            # TEI on CPU: reduce batch size for better timeout handling
+            batch_size = 16  # Smaller batches on CPU (was 32)
             vectors = []
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
