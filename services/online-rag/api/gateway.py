@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 import requests
 from generation.llm_service import generate_response
 
@@ -24,6 +25,68 @@ except ImportError as e:
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_chunks")
+
+
+class CustomQdrant(Qdrant):
+    """Кастомный Qdrant класс для работы с нашей структурой данных."""
+    
+    def _document_from_scored_point(self, scored_point):
+        """Переопределяем метод для правильной обработки нашей структуры."""
+        payload = scored_point.payload
+        
+        # Ищем текст в разных полях
+        text_content = None
+        if payload:
+            # Приоритет полей для текста
+            text_content = (payload.get('text') or 
+                          payload.get('enriched_text') or 
+                          payload.get('content'))
+        
+        # Если текста нет, пропускаем документ
+        if not text_content or not text_content.strip():
+            return None
+        
+        # Создаем metadata без текстовых полей
+        metadata = {}
+        if payload:
+            for key, value in payload.items():
+                if key not in ['text', 'enriched_text', 'content']:
+                    metadata[key] = value
+        
+        # Создаем Document с правильным page_content
+        return Document(
+            page_content=text_content,
+            metadata=metadata
+        )
+    
+    def _document_from_point(self, point):
+        """Переопределяем метод для правильной обработки нашей структуры."""
+        payload = point.payload
+        
+        # Ищем текст в разных полях
+        text_content = None
+        if payload:
+            # Приоритет полей для текста
+            text_content = (payload.get('text') or 
+                          payload.get('enriched_text') or 
+                          payload.get('content'))
+        
+        # Если текста нет, пропускаем документ
+        if not text_content or not text_content.strip():
+            return None
+        
+        # Создаем metadata без текстовых полей
+        metadata = {}
+        if payload:
+            for key, value in payload.items():
+                if key not in ['text', 'enriched_text', 'content']:
+                    metadata[key] = value
+        
+        # Создаем Document с правильным page_content
+        return Document(
+            page_content=text_content,
+            metadata=metadata
+        )
 
 
 class TEIEmbeddings(Embeddings):
@@ -67,7 +130,7 @@ app = FastAPI(title="RAG Gateway")
 @app.post("/query")
 def query_endpoint(req: QueryRequest):
     embeddings = TEIEmbeddings()
-    vs = Qdrant.from_existing_collection(
+    vs = CustomQdrant.from_existing_collection(
         embedding=embeddings,
         collection_name=QDRANT_COLLECTION,
         url=QDRANT_URL,
@@ -79,15 +142,29 @@ def query_endpoint(req: QueryRequest):
     initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
     docs = vs.similarity_search(req.query, k=initial_k)
     
+    # Дополнительная фильтрация (кастомный класс уже обрабатывает пустые документы)
+    docs = [doc for doc in docs if doc and doc.page_content and doc.page_content.strip()]
+    
+    # Check if we have any valid documents
+    if not docs:
+        logging.warning("No valid documents found in search results")
+        return {
+            "answer": "Извините, не удалось найти релевантную информацию для вашего запроса.",
+            "sources": [],
+            "processing_time_ms": 0,
+            "error": "No valid documents found"
+        }
+    
     # Apply reranking if enabled and available
     if req.use_reranking and RERANKING_AVAILABLE and docs:
         try:
             # Convert docs to format expected by reranker
             candidates = []
             for d in docs:
-                meta = getattr(d, 'metadata', {})
-                if 'text' not in meta and hasattr(d, 'page_content'):
-                    meta = {**meta, 'text': getattr(d, 'page_content')}
+                meta = getattr(d, 'metadata', {}) or {}
+                # Добавляем текст для реранкинга
+                if hasattr(d, 'page_content') and d.page_content:
+                    meta = {**meta, 'text': d.page_content}
                 candidates.append(meta)
             
             # Rerank candidates
@@ -95,7 +172,11 @@ def query_endpoint(req: QueryRequest):
             reranked_candidates = rerank_candidates(req.query, candidates, top_k=rerank_k)
             
             # Update docs with reranked order
-            docs = docs[:len(reranked_candidates)]  # Keep original docs but limit to reranked count
+            if reranked_candidates:
+                docs = docs[:len(reranked_candidates)]  # Keep original docs but limit to reranked count
+            else:
+                logging.warning("Reranking returned no candidates, using original docs")
+                docs = docs[:req.k]
             
             logging.info(f"Reranking applied: {len(candidates)} -> {len(reranked_candidates)} candidates")
             
@@ -108,16 +189,33 @@ def query_endpoint(req: QueryRequest):
     elif not req.use_reranking or not RERANKING_AVAILABLE:
         docs = docs[:req.k]
     
-    context = "\n\n".join(d.page_content for d in docs)
+    # Build context safely
+    context_parts = []
+    for d in docs:
+        if hasattr(d, 'page_content') and d.page_content and d.page_content.strip():
+            context_parts.append(d.page_content.strip())
+    
+    if not context_parts:
+        logging.warning("No valid context found for generation")
+        return {
+            "answer": "Извините, не удалось найти релевантную информацию для вашего запроса.",
+            "sources": [],
+            "processing_time_ms": 0,
+            "error": "No valid context found"
+        }
+    
+    context = "\n\n".join(context_parts)
     prompt = f"Answer the question using the context.\n\nContext:\n{context}\n\nQuestion: {req.query}"
     answer, thoughts = generate_response(prompt)
 
     sources = []
     for d in docs:
-        meta = getattr(d, 'metadata', {})
-        # try both common keys for chunk text
-        if 'text' not in meta and hasattr(d, 'page_content'):
-            meta = {**meta, 'text': getattr(d, 'page_content')}
+        # Получаем metadata и text из Document (уже правильно обработанного)
+        meta = getattr(d, 'metadata', {}) or {}
+        text_content = getattr(d, 'page_content', '')
+        
+        # Добавляем текст в metadata для ответа
+        meta = {**meta, 'text': text_content}
         sources.append(meta)
     if req.include_vectors:
         try:
