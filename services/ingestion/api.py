@@ -298,7 +298,17 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
 
         try:
             start_qdrant = time.time()
-            vectors = embeddings.embed_documents(texts)
+            
+            # Batch embeddings to avoid exceeding TEI max_client_batch_size
+            # TEI on CPU has max_client_batch_size=32
+            batch_size = 32
+            vectors = []
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                batch_vectors = embeddings.embed_documents(batch)
+                vectors.extend(batch_vectors)
+                LOGGER.debug(f"embedded_batch batch={i//batch_size + 1} size={len(batch)}")
+            
             points = []
             for text_value, vec, meta in zip(texts, vectors, metadatas):
                 # Use deterministic UUID based on chunk identity to satisfy Qdrant ID constraints
