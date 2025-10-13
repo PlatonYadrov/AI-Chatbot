@@ -293,7 +293,25 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
 
         # 5) Upsert into Qdrant with deterministic IDs (chunk_id)
         _ensure_collection()
-        texts = [c["text"] for c in unique_chunks]
+        
+        # Truncate texts to max model context length
+        # BGE-M3: 8192 tokens ≈ 32768 chars
+        # e5-base: 512 tokens ≈ 2048 chars
+        embeddings_model = os.getenv("EMBEDDINGS_MODEL", "intfloat/e5-base")
+        if "bge-m3" in embeddings_model.lower():
+            MAX_CHARS = 32768  # BGE-M3 supports 8192 tokens
+        elif "mistral" in embeddings_model.lower():
+            MAX_CHARS = 131072  # e5-mistral supports 32768 tokens
+        else:
+            MAX_CHARS = 2048  # Default: e5-base (512 tokens)
+        texts = []
+        for c in unique_chunks:
+            text = c["text"]
+            if len(text) > MAX_CHARS:
+                text = text[:MAX_CHARS]
+                LOGGER.debug(f"truncated_chunk original={len(c['text'])} truncated={len(text)}")
+            texts.append(text)
+        
         metadatas = [c["metadata"] for c in unique_chunks]
 
         try:

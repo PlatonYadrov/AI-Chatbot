@@ -93,9 +93,9 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=1  # Use GPU 1 (L4)
     command: >-
-      --model-id intfloat/e5-base
+      --model-id BAAI/bge-m3
       --dtype float16
-      --max-batch-tokens 16384
+      --max-batch-tokens 32768
     ports:
       - "8080:80"
     volumes:
