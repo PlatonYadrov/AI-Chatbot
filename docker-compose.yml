@@ -22,7 +22,7 @@ services:
       # VLM disabled by default - uncomment if you have spare VRAM
       # - CUDA_VISIBLE_DEVICES=1
       # Docling Chunking (structure-aware) - set to true for better RAG quality
-      - USE_DOCLING_CHUNKING=false
+      - USE_DOCLING_CHUNKING=true
       - CHUNKING_MAX_TOKENS=450   # multilingual-e5-large: 512 tokens limit
       - CHUNKING_OVERLAP=100
       # - CHUNKING_TOKENIZER=bert-base-uncased  # Auto-detected from EMBEDDINGS_MODEL
