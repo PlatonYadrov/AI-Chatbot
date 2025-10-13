@@ -90,12 +90,15 @@ services:
               capabilities: [gpu]
   embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:cuda-sha-a593f66
+    runtime: nvidia  # Alternative GPU config
     environment:
       - CUDA_VISIBLE_DEVICES=1  # Use GPU 1 (L4)
+      - NVIDIA_VISIBLE_DEVICES=1
     command: >-
       --model-id intfloat/multilingual-e5-large
       --dtype float16
       --max-batch-tokens 16384
+      --auto-truncate
     ports:
       - "8080:80"
     volumes:

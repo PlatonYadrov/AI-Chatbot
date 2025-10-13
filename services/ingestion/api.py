@@ -294,25 +294,9 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         # 5) Upsert into Qdrant with deterministic IDs (chunk_id)
         _ensure_collection()
         
-        # Truncate texts to max model context length
-        embeddings_model = os.getenv("EMBEDDINGS_MODEL", "intfloat/e5-base")
-        if "bge-m3" in embeddings_model.lower():
-            MAX_CHARS = 32768  # BGE-M3: 8192 tokens
-        elif "bge" in embeddings_model.lower():
-            MAX_CHARS = 2048  # BGE-base/large: 512 tokens
-        elif "e5-large" in embeddings_model.lower() or "e5-base" in embeddings_model.lower():
-            MAX_CHARS = 2048  # e5-base/large: 512 tokens
-        elif "mistral" in embeddings_model.lower():
-            MAX_CHARS = 131072  # e5-mistral: 32768 tokens
-        else:
-            MAX_CHARS = 2048  # Default: 512 tokens
-        texts = []
-        for c in unique_chunks:
-            text = c["text"]
-            if len(text) > MAX_CHARS:
-                text = text[:MAX_CHARS]
-                LOGGER.debug(f"truncated_chunk original={len(c['text'])} truncated={len(text)}")
-            texts.append(text)
+        # TEI auto-truncate enabled - no manual truncation needed
+        # Model will automatically truncate inputs to max context length
+        texts = [c["text"] for c in unique_chunks]
         
         metadatas = [c["metadata"] for c in unique_chunks]
 
