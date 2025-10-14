@@ -243,7 +243,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                 
                 for chunk in docling_chunks:
                     chunk_dicts.append(chunk.to_dict())
-                print(chunk_dicts)
+                    print(chunk.to_dict())
                 
                 LOGGER.info(
                     "docling_chunking_complete",
@@ -266,7 +266,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                 merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
                 for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
                     chunk_dicts.append(chunk.to_dict())
-                print(chunk_dicts)
+                # print(chunk_dicts)
             
             LOGGER.info(
                 "traditional_chunking_complete",
