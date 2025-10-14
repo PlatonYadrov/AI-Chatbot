@@ -261,14 +261,20 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         
         # Strategy 2: Traditional chunking (fallback or default)
         if not chunk_dicts:
-            for block in parser_blocks:
+            for i, block in enumerate(parser_blocks):
                 # Docling provides pre-cleaned text, no additional normalization needed
                 if not block.text or not block.text.strip():
                     continue
+
+                print(f"\n=== Block {i} Debug ===")
+                print(f"Block text length: {len(block.text)}")
+                print(f"Block meta: {block.meta}")
+                print(f"Block attributes: {[attr for attr in dir(block) if not attr.startswith('_')]}")
                 merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
                 for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
                     chunk_dicts.append(chunk.to_dict())
-                print(len(chunk_dicts))
+                    print("============================")
+                    print(f"[Chunk {len(chunk_dicts)}] {chunk.text}")
             
             LOGGER.info(
                 "traditional_chunking_complete",
