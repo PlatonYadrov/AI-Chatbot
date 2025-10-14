@@ -10,6 +10,8 @@ services:
       - rag_data:/data
       # Mount Docling model cache for offline operation
       - docling_models:/app/.cache/huggingface
+      # Mount output directory for processed documents (MD files)
+      - ./output/processed_docs:/data/processed
     environment:
       # Docling local configuration
       - DOCLING_OFFLINE_MODE=true
