@@ -230,7 +230,9 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         
         # Strategy 1: Docling HybridChunker (structure-aware, recommended)
         use_hybrid_chunking = USE_DOCLING_CHUNKING and docling_chunker and suffix in supported_formats
-        if use_hybrid_chunking:
+        print(f"USE_DOCLING_CHUNKING: {USE_DOCLING_CHUNKING}")
+        ########################
+        if False:
             try:
                 # Get DoclingDocument for structure-aware chunking
                 doc, md_text = parser.parse_to_document(str(tmp_path), doc_id=doc_id, markdown=True)
@@ -266,7 +268,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                 merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
                 for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
                     chunk_dicts.append(chunk.to_dict())
-                # print(chunk_dicts)
+                print(len(chunk_dicts))
             
             LOGGER.info(
                 "traditional_chunking_complete",
