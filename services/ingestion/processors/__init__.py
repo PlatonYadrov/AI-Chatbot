@@ -9,5 +9,6 @@ __all__ = [
     "DoclingChunker",
     "DoclingChunk",
     "chunk_docling_document",
+    "chunk_docling_token_packer",
 ]
 

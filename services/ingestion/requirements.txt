@@ -32,4 +32,7 @@ reportlab>=4.0.0
 # Optional: VLM for advanced image understanding (requires GPU)
 # Uncomment ONLY if you have spare VRAM (4-6GB) after vLLM allocation
 # docling[vlm]>=2.0.0
-
+transformers
+sentencepiece
+tiktoken
+langchain

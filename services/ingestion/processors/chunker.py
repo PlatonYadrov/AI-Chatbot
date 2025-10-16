@@ -1,314 +1,457 @@
-"""Production chunking with token-aware, sentence boundaries, and metadata."""
-
-from __future__ import annotations
-
-import hashlib
-import os
+# ===================== Token-aware Docling chunker (hard ≤ HARD_MAX) =====================
 import re
-import logging
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Sequence
+from typing import List, Dict, Any, Optional
+from transformers import AutoTokenizer
+tokenizer = AutoTokenizer.from_pretrained("intfloat/multilingual-e5-large")
 
-try:
-    import yaml
-    _YAML_OK = True
-except ImportError:
-    _YAML_OK = False
+# ---- параметры по умолчанию (под RAG) ----
+TARGET_TOKENS = 400     # желаемый размер чанка
+HARD_MAX      = 512     # потолок токенов на чанк (жёсткая гарантия)
+MIN_TOKENS    = 120     # минимальный размер (коротыши будут склеиваться)
+OVERLAP_SENTS = 1       # оверлап по предложениям между чанками
 
-try:
-    import tiktoken
-    _TIKTOKEN_OK = True
-except ImportError:
-    _TIKTOKEN_OK = False
+# Разделение на предложения (простое, EN/RU)
+_sent_re = re.compile(r"(?<=[\.\!\?])\s+(?=[A-ZА-Я0-9])")
 
-try:
-    from sentence_transformers import SentenceTransformer
-    _ST_OK = True
-except ImportError:
-    _ST_OK = False
+def split_sents(txt: str) -> List[str]:
+    parts = [s.strip() for s in _sent_re.split(txt) if s.strip()]
+    return parts or ([txt] if txt else [])
 
+# ---- токенайзер (intfloat/multilingual-e5-large) должен быть заранее создан пользователем ----
+# tokenizer = AutoTokenizer.from_pretrained("intfloat/multilingual-e5-large")
 
-DEFAULT_SEPARATORS: Sequence[str] = ("\n## ", "\n### ", "\n\n", "\n", ". ", " ")
+def tlen(text: str) -> int:
+    """Точный подсчёт токенов e5 без усечения и без спец-символов."""
+    return len(tokenizer.encode(text, add_special_tokens=False, truncation=False))
 
-LOGGER = logging.getLogger(__name__)
+# ---- таблицы: поддержка и объектной и dict-структуры ----
+def _cell_text(cell) -> str:
+    """Достаёт человекочитаемый текст ячейки."""
+    if isinstance(cell, str):
+        return cell
+    if isinstance(cell, dict):
+        return str(cell.get("text", ""))
+    return str(getattr(cell, "text", cell))
 
-class Chunk:
-    """Represents a text chunk with metadata."""
-    
-    def __init__(self, text: str, metadata: Dict[str, Any]):
-        self.text = text
-        self.metadata = metadata
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {"text": self.text, "metadata": self.metadata}
-
-
-def _load_config() -> dict:
-    # Resolve config relative to app root when packaged into /app
-    # Try conventional path first, then fall back to env or CWD
-    candidates = []
-    try:
-        candidates.append(Path(__file__).resolve().parents[2] / "configs" / "model_config.yaml")
-    except Exception:
-        pass
-    candidates.append(Path("/app/configs/model_config.yaml"))
-    candidates.append(Path.cwd() / "configs" / "model_config.yaml")
-    config_path = next((p for p in candidates if p.exists()), None)
-    if not config_path:
-        return {}
-    if _YAML_OK and config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
-        except Exception:
-            LOGGER.exception("chunker_config_load_failed", extra={"path": str(config_path)})
-            return {}
-    return {}
-
-
-def _get_tokenizer(model_name: str = "cl100k_base"):
-    if _TIKTOKEN_OK:
-        try:
-            return tiktoken.get_encoding(model_name)
-        except Exception:
-            LOGGER.exception("tokenizer_get_failed", extra={"model": model_name})
-            return tiktoken.get_encoding("cl100k_base")
+def _extract_grid(table_data):
+    """Возвращает 2D-список ячеек (объект/словарь поддерживаются)."""
+    if hasattr(table_data, "grid"):
+        return table_data.grid
+    if isinstance(table_data, dict) and "grid" in table_data:
+        return table_data["grid"]
     return None
 
-
-def _count_tokens(text: str, tokenizer) -> int:
-    if tokenizer:
-        return len(tokenizer.encode(text))
-    # Fallback: rough estimate (1 token ≈ 4 chars)
-    return len(text) // 4
-
-
-def _hash_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _split_sentences(text: str) -> List[str]:
-    """Split text into sentences (simple regex-based)."""
-    splitter = re.compile(r"(?<=[\.!?])\s+(?=[A-ZА-ЯЁ])")
-    sentences = [s.strip() for s in splitter.split(text) if s.strip()]
-    return sentences if sentences else [text]
-
-
-def chunk_text(
-    normalised_text: str,
-    doc_metadata: Optional[Dict[str, Any]] = None,
-    chunk_size_tokens: int = 300,
-    overlap_tokens: int = 75,
-    min_chunk_tokens: int = 50,
-    max_chunk_tokens: int = 512,
-    lang: str = "en",
-    strategy: str = "token_aware",
-) -> List[Chunk]:
-    """
-    Chunk text with token-aware sentence boundaries and metadata.
-    
-    Compatible with Docling-parsed text (already cleaned and normalized).
-    
-    Args:
-        normalised_text: cleaned text (from Docling or other parsers)
-        doc_metadata: document metadata (doc_id, source_uri, label, headings, etc.)
-        chunk_size_tokens: target chunk size in tokens
-        overlap_tokens: overlap in tokens
-        min_chunk_tokens: minimum chunk size (discard smaller)
-        max_chunk_tokens: hard limit
-        lang: language code
-        strategy: 'token_aware', 'recursive', or 'semantic'
-    
-    Returns:
-        List of Chunk objects with text and metadata
-    """
-    config = _load_config().get("chunking", {})
-    chunk_size_tokens = config.get("chunk_size_tokens", chunk_size_tokens)
-    overlap_tokens = config.get("overlap_tokens", overlap_tokens)
-    min_chunk_tokens = config.get("min_chunk_tokens", min_chunk_tokens)
-    max_chunk_tokens = config.get("max_chunk_tokens", max_chunk_tokens)
-    strategy = config.get("strategy", strategy)
-    LOGGER.debug(
-        "chunker_config",
-        extra={
-            "strategy": strategy,
-            "chunk_size_tokens": chunk_size_tokens,
-            "overlap_tokens": overlap_tokens,
-            "min_chunk_tokens": min_chunk_tokens,
-            "max_chunk_tokens": max_chunk_tokens,
-        },
-    )
-    
-    tokenizer = _get_tokenizer()
-    doc_metadata = doc_metadata or {}
-    
-    text = normalised_text.strip()
-    if not text:
+def _grid_to_rows(grid) -> List[List[str]]:
+    """Преобразует сетку таблицы в список строк (списков ячеек)."""
+    if not grid or not isinstance(grid, list) or not grid[0]:
         return []
-    
-    # Choose strategy
-    if strategy == "semantic" and _ST_OK:
-        raw_chunks = _semantic_chunk(text, chunk_size_tokens * 4)  # approx chars
-    elif strategy == "token_aware":
-        raw_chunks = _token_aware_chunk(text, tokenizer, chunk_size_tokens, overlap_tokens, max_chunk_tokens)
-    else:
-        # Fallback to recursive char-based
-        raw_chunks = _recursive_chunk(text, chunk_size_tokens * 4, overlap_tokens * 4)
-    
-    # Build Chunk objects with metadata
-    chunks: List[Chunk] = []
-    for idx, chunk_text in enumerate(raw_chunks):
-        tokens = _count_tokens(chunk_text, tokenizer)
-        if tokens < min_chunk_tokens:
-            continue
-        chunk_metadata = {
-            **doc_metadata,
-            "chunk_index": idx,
-            "chunk_id": f"{doc_metadata.get('doc_id', 'unknown')}_{idx}",
-            "chunk_hash": _hash_text(chunk_text),
-            "tokens": tokens,
-            "language": lang,
-        }
-        chunks.append(Chunk(chunk_text, chunk_metadata))
-    
-    LOGGER.debug("chunker_result", extra={"chunks": len(chunks)})
-    return chunks
+    return [[_cell_text(c) for c in row] for row in grid]
 
+def _rows_to_markdown(rows: List[List[str]]) -> str:
+    """Markdown из строк (первая строка — заголовок)."""
+    if not rows:
+        return ""
+    header = " | ".join(rows[0])
+    sep    = " | ".join(["---"] * len(rows[0]))
+    body   = [" | ".join(r) for r in rows[1:]]
+    return "\n".join([header, sep, *body])
 
-def _token_aware_chunk(
-    text: str,
-    tokenizer,
-    chunk_size_tokens: int,
-    overlap_tokens: int,
-    max_chunk_tokens: int,
-) -> List[str]:
-    """Token-aware sentence-boundary chunking."""
-    sentences = _split_sentences(text)
-    if not sentences:
+def _split_markdown_table(rows: List[List[str]], max_tokens: int) -> List[str]:
+    """
+    Режет markdown-таблицу по строкам так, чтобы каждый фрагмент ≤ max_tokens.
+    Заголовок повторяется в каждом фрагменте.
+    """
+    if not rows:
         return []
-    
-    chunks: List[str] = []
-    current_sentences: List[str] = []
-    current_tokens = 0
-    
-    for sent in sentences:
-        sent_tokens = _count_tokens(sent, tokenizer)
-        
-        if current_tokens + sent_tokens > chunk_size_tokens and current_sentences:
-            # Finalize current chunk
-            chunks.append(" ".join(current_sentences))
-            
-            # Keep overlap sentences
-            overlap_sents = []
-            overlap_tok = 0
-            for s in reversed(current_sentences):
-                s_tok = _count_tokens(s, tokenizer)
-                if overlap_tok + s_tok <= overlap_tokens:
-                    overlap_sents.insert(0, s)
-                    overlap_tok += s_tok
-                else:
-                    break
-            current_sentences = overlap_sents
-            current_tokens = overlap_tok
-        
-        current_sentences.append(sent)
-        current_tokens += sent_tokens
-        
-        # Hard limit
-        if current_tokens > max_chunk_tokens:
-            chunks.append(" ".join(current_sentences))
-            current_sentences = []
-            current_tokens = 0
-    
-    if current_sentences:
-        chunks.append(" ".join(current_sentences))
-    
-    return chunks
+    header = rows[0]
+    sep = ["---"] * len(header)
 
+    parts = []
+    cur_rows = [header, sep]
+    cur_txt = _rows_to_markdown(cur_rows)
+    cur_len = tlen(cur_txt)
 
-def _recursive_chunk(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
-    """Recursive char-based chunking (fallback)."""
-    if len(text) <= chunk_size:
-        return [text]
-    
-    for separator in DEFAULT_SEPARATORS:
-        parts = text.split(separator)
-        if len(parts) == 1:
-            continue
-        chunks: List[str] = []
-        current = ""
-        for part in parts:
-            candidate = separator.join(filter(None, [current, part])).strip()
-            if not candidate:
-                continue
-            if len(candidate) <= chunk_size:
-                current = candidate
-                continue
-            if current:
-                chunks.append(current)
-            if len(part) <= chunk_size:
-                current = part
-            else:
-                chunks.extend(_recursive_chunk(part, chunk_size, chunk_overlap))
-                current = ""
-        if current:
-            chunks.append(current)
-        break
-    else:
-        step = max(1, chunk_size - chunk_overlap)
-        return [text[i:i + chunk_size] for i in range(0, len(text), step)]
-    
-    return _apply_overlap(chunks, chunk_overlap)
-
-
-def _apply_overlap(chunks: Sequence[str], overlap: int) -> List[str]:
-    if not chunks or overlap <= 0:
-        return list(chunks)
-    window: List[str] = []
-    for chunk in chunks:
-        if not window:
-            window.append(chunk)
+    for r in rows[1:]:
+        # попробуем добавить строку
+        candidate = "\n".join([_rows_to_markdown(cur_rows), " | ".join(r)])
+        cand_len = tlen(candidate)
+        if cand_len <= max_tokens:
+            # обновим cur_rows/cur_len аккуратно
+            cur_rows.append(r)
+            cur_txt = candidate
+            cur_len = cand_len
         else:
-            tail = window[-1][-overlap:]
-            window.append((tail + " " + chunk).strip())
-    return window
+            # зафиксируем текущий фрагмент
+            parts.append(_rows_to_markdown(cur_rows))
+            # начнём новый с повтором заголовка
+            cur_rows = [header, sep, r]
+            cur_txt = _rows_to_markdown(cur_rows)
+            cur_len = tlen(cur_txt)
+            # если даже одна строка с заголовком не помещается (крайне редко):
+            if cur_len > max_tokens:
+                # жёстко усечём по ячейкам в этой строке
+                safe_cells = []
+                for cell in r:
+                    probe = "\n".join([_rows_to_markdown([header, sep]), " | ".join(safe_cells + [cell])])
+                    if tlen(probe) <= max_tokens:
+                        safe_cells.append(cell)
+                    else:
+                        break
+                cur_rows = [header, sep, safe_cells] if safe_cells else [header, sep]
+                cur_txt = _rows_to_markdown(cur_rows)
+                cur_len = tlen(cur_txt)
 
+    if tlen(_rows_to_markdown(cur_rows)) > 0:
+        parts.append(_rows_to_markdown(cur_rows))
+    return parts
 
-def _semantic_chunk(text: str, chunk_size: int) -> List[str]:
-    """Semantic chunking using sentence embeddings."""
-    if not _ST_OK:
-        LOGGER.info("semantic_chunk_fallback_recursive")
-        return _recursive_chunk(text, chunk_size, chunk_size // 5)
+# ---- основной чанкер ----
+def chunk_docling_token_packer(
+    doc, *,
+    target_tokens: int = TARGET_TOKENS,
+    hard_max: int      = HARD_MAX,
+    min_tokens: int    = MIN_TOKENS,
+    overlap_sents: int = OVERLAP_SENTS,
+    keep_tables_md: bool = True,
+    table_mode: str = "inline",        # "inline" | "separate"
+    doc_id: Optional[str] = None,
+    src_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Упаковывает элементы DoclingDocument в токено-осознанные чанки (жёстко ≤ hard_max).
+    - Заголовки открывают новую секцию и включаются в текст чанка.
+    - Таблицы:
+        * inline: превращаются в Markdown и идут вместе с текстом (режутся по строкам при необходимости)
+        * separate: каждая таблица — отдельный чанк; если не влезает — режется по строкам на несколько чанков
+    - Длинные абзацы режутся по предложениям.
+    - Коротыши склеиваются постфактум (без превышения hard_max).
 
+    Возвращает: List[{"text": str, "meta": dict}]
+    meta: doc_id, path, section_path, page_start/end, block_start/end, types, table_index?
+    """
+    assert table_mode in ("inline", "separate"), "table_mode должен быть 'inline' или 'separate'"
+
+    chunks: List[Dict[str, Any]] = []
+
+    cur_text: List[str] = []
+    cur_tokens = 0
+    cur_meta = {
+        "doc_id": doc_id, "path": src_path,
+        "types": set(), "section_path": [],
+        "page_start": None, "page_end": None,
+        "block_start": None, "block_end": None,
+    }
+    last_tail: List[str] = []  # предложения для overlap
+    table_index = 0            # сквозная нумерация таблиц
+    block_idx = -1
+
+    def flush():
+        nonlocal cur_text, cur_tokens, last_tail
+        if not cur_text:
+            return
+        text = "\n\n".join([x for x in cur_text if x.strip()])
+        # контроль безопасности
+        if tlen(text) > hard_max:
+            # крайний случай: ещё раз дорежем по предложениям
+            sents = split_sents(text)
+            buf = []
+            buf_len = 0
+            safe_chunks = []
+            for s in sents:
+                sl = tlen(s)
+                if buf and buf_len + sl > hard_max:
+                    safe_chunks.append("\n".join(buf))
+                    buf, buf_len = [], 0
+                if sl > hard_max:
+                    # очень длинное «предложение»: усечём по символам как fallback
+                    piece = s
+                    while tlen(piece) > hard_max:
+                        # грубое деление пополам по символам
+                        half = max(1, len(piece)//2)
+                        left, piece = piece[:half], piece[half:]
+                        # добить левую сторону до ≤ hard_max
+                        while tlen(left) > hard_max and len(left) > 1:
+                            left = left[:-1]
+                        safe_chunks.append(left)
+                    if piece:
+                        buf.append(piece); buf_len += tlen(piece)
+                else:
+                    buf.append(s); buf_len += sl
+            if buf:
+                safe_chunks.append("\n".join(buf))
+            # записываем безопасные куски как отдельные чанки
+            for sc in safe_chunks:
+                chunks.append({"text": sc, "meta": {**cur_meta, "types": sorted(cur_meta["types"])}})
+        else:
+            sents = split_sents(text)
+            last_tail = sents[-overlap_sents:] if overlap_sents and sents else []
+            chunks.append({"text": text, "meta": {**cur_meta, "types": sorted(cur_meta["types"])}})
+
+        # сброс для нового чанка (кроме хлебных крошек section_path)
+        cur_text.clear(); cur_tokens = 0
+        cur_meta["page_start"] = None; cur_meta["page_end"] = None
+        cur_meta["block_start"] = None; cur_meta["block_end"] = None
+        cur_meta["types"] = set()
+
+    def try_put_text(piece: str, typ: str, page_no, blk_idx, *, allow_overlap=True):
+        """Безопасно положить текст в текущий чанк, не превышая hard_max."""
+        nonlocal cur_tokens
+        if not piece.strip():
+            return
+        tok = tlen(piece)
+
+        if tok > hard_max:
+            # режем по предложениям
+            for sent in split_sents(piece):
+                s_tok = tlen(sent)
+                if s_tok > hard_max:
+                    # emergency: дробим по символам
+                    frag = sent
+                    while tlen(frag) > hard_max:
+                        half = max(1, len(frag)//2)
+                        left, frag = frag[:half], frag[half:]
+                        while tlen(left) > hard_max and len(left) > 1:
+                            left = left[:-1]
+                        try_put_text(left, typ, page_no, blk_idx, allow_overlap=False)
+                    if frag:
+                        try_put_text(frag, typ, page_no, blk_idx, allow_overlap=False)
+                else:
+                    if cur_text and cur_tokens + s_tok > hard_max:
+                        flush()
+                    cur_text.append(sent); cur_tokens += s_tok
+                    cur_meta["types"].add(typ)
+                    cur_meta["block_start"] = cur_meta["block_start"] or blk_idx
+                    cur_meta["block_end"] = blk_idx
+                    if cur_meta["page_start"] is None: cur_meta["page_start"] = page_no
+                    cur_meta["page_end"] = page_no or cur_meta["page_end"]
+            return
+
+        # обычное добавление
+        if cur_text and cur_tokens + tok > hard_max:
+            flush()
+        cur_text.append(piece); cur_tokens += tok
+        cur_meta["types"].add(typ)
+        cur_meta["block_start"] = cur_meta["block_start"] or blk_idx
+        cur_meta["block_end"] = blk_idx
+        if cur_meta["page_start"] is None: cur_meta["page_start"] = page_no
+        cur_meta["page_end"] = page_no or cur_meta["page_end"]
+
+    def maybe_new_chunk_for(tokens_needed: int) -> None:
+        """Открывает новый чанк, если добавление переполнит target/hard_max."""
+        nonlocal cur_tokens
+        if not cur_text:
+            return
+        if cur_tokens + tokens_needed <= hard_max and cur_tokens + tokens_needed <= target_tokens:
+            return
+        # Если текущий чанк ещё слишком мал — лучше потерпеть, чтобы не плодить коротышей
+        if cur_tokens < int(0.6 * target_tokens) and cur_tokens + tokens_needed <= hard_max:
+            return
+        flush()
+        # переносим overlap из прошлого чанка (хвост предложений), если влезает
+        if last_tail:
+            pre = " ".join(last_tail)
+            pre_len = tlen(pre)
+            if pre_len < int(0.2 * target_tokens) and pre_len <= hard_max:
+                cur_text.append(pre); cur_tokens += pre_len
+
+    # -------- обходим элементы документа --------
+    for item, level in doc.iterate_items():
+        block_idx += 1
+        d = item.model_dump() if hasattr(item, "model_dump") else {}
+        label = (d.get("label") or "text").lower()
+
+        # провенанс
+        page_no, bbox = None, None
+        prov = getattr(item, "prov", None)
+        prov_list = prov if isinstance(prov, list) else ([prov] if prov else [])
+        for p in prov_list:
+            if page_no is None and hasattr(p, "page_no"):
+                page_no = getattr(p, "page_no")
+            if bbox is None and hasattr(p, "bbox") and getattr(p, "bbox", None):
+                b = p.bbox; bbox = (b.l, b.t, b.r, b.b)
+
+        # --- заголовки (обновляют section_path и включаются в текст) ---
+        if label in {"title", "section_header", "heading"}:
+            flush()  # заголовок открывает логический раздел
+            text = (d.get("text") or "").strip()
+            try: h = int(level) if level is not None else 2
+            except: h = 2
+            while len(cur_meta["section_path"]) >= h:
+                cur_meta["section_path"].pop()
+            if text:
+                cur_meta["section_path"].append(text)
+                header = f"{'#' * min(6, h+1)} {text}"
+                h_len = tlen(header)
+                maybe_new_chunk_for(h_len)
+                try_put_text(header, "heading", page_no, block_idx)
+            continue
+
+        # --- таблицы ---
+        if label == "table":
+            data = d.get("data")
+            grid = _extract_grid(data)
+            if keep_tables_md and grid:
+                rows = _grid_to_rows(grid)
+                if not rows:
+                    continue
+                # если режим separate — каждый фрагмент таблицы становится отдельным чанком
+                if table_mode == "separate":
+                    # закроем текущий чанк (чтобы таблица шла отдельно)
+                    flush()
+                    table_index += 1
+                    md_parts = _split_markdown_table(rows, hard_max)
+                    for part in md_parts:
+                        # гарантировано ≤ hard_max
+                        chunks.append({
+                            "text": part,
+                            "meta": {
+                                "doc_id": doc_id, "path": src_path,
+                                "types": ["table"],
+                                "section_path": list(cur_meta["section_path"]),
+                                "page_start": page_no, "page_end": page_no,
+                                "block_start": block_idx, "block_end": block_idx,
+                                "table_index": table_index,
+                            }
+                        })
+                else:
+                    # inline: включаем таблицу в текущий поток, при необходимости дробя её
+                    md_parts = _split_markdown_table(rows, hard_max)
+                    for part in md_parts:
+                        ptok = tlen(part)
+                        maybe_new_chunk_for(ptok)
+                        try_put_text(part, "table", page_no, block_idx)
+                        cur_meta["table_index"] = table_index + 1  # предварительно присвоим
+                    table_index += 1
+            else:
+                # нет grid — кладём текстовое представление, при необходимости режем
+                md_table = str(data) if data is not None else ""
+                if not md_table.strip():
+                    continue
+                if table_mode == "separate":
+                    flush()
+                    table_index += 1
+                    # безопасно положим как текст (с разбиением)
+                    try_put_text(md_table, "table", page_no, block_idx)
+                    # переведём последний(е) добавленные куска в режим "separate"? — уже идут отдельными чанками из-за flush() + try_put_text()
+                    # добавим table_index в последний чанк
+                    if chunks:
+                        chunks[-1]["meta"]["table_index"] = table_index
+                        chunks[-1]["meta"]["types"] = sorted(set(chunks[-1]["meta"]["types"]) | {"table"})
+                else:
+                    maybe_new_chunk_for(tlen(md_table))
+                    try_put_text(md_table, "table", page_no, block_idx)
+                    table_index += 1
+            continue
+
+        # --- обычный текст/прочие элементы ---
+        block_text = (d.get("text") or "").rstrip()
+        if not block_text.strip():
+            continue
+
+        block_tokens = tlen(block_text)
+
+        # Очень длинный абзац — режем по предложениям и упаковываем
+        if block_tokens > hard_max:
+            for sent in split_sents(block_text):
+                try_put_text(sent, "text", page_no, block_idx)
+            continue
+
+        # обычная упаковка целого блока
+        maybe_new_chunk_for(block_tokens)
+        try_put_text(block_text, "text" if label != "list_item" else "text", page_no, block_idx)
+
+    # доброс последнего
+    flush()
+
+    # ---- постобработка: склейка коротышей (с уважением к hard_max) ----
+    def merge_shorts(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not items:
+            return items
+        out = [items[0]]
+        for c in items[1:]:
+            left = out[-1]
+            # можно ли слить и не превысить лимит?
+            if tlen(left["text"]) < min_tokens and tlen(left["text"]) + tlen(c["text"]) <= hard_max:
+                left["text"] = left["text"].rstrip() + "\n\n" + c["text"]
+                left["meta"]["types"] = sorted(set(left["meta"]["types"]) | set(c["meta"]["types"]))
+                left["meta"]["page_end"] = c["meta"]["page_end"] or left["meta"]["page_end"]
+                left["meta"]["block_end"] = c["meta"]["block_end"]
+                if "table_index" in c["meta"] and "table_index" not in left["meta"]:
+                    left["meta"]["table_index"] = c["meta"]["table_index"]
+            else:
+                out.append(c)
+        # если последний остался маленьким — аккуратно попробуем склеить с предпоследним
+        if len(out) >= 2 and tlen(out[-1]["text"]) < min_tokens:
+            prev = out[-2]; last = out[-1]
+            if tlen(prev["text"]) + tlen(last["text"]) <= hard_max:
+                prev["text"] = prev["text"].rstrip() + "\n\n" + last["text"]
+                prev["meta"]["types"] = sorted(set(prev["meta"]["types"]) | set(last["meta"]["types"]))
+                prev["meta"]["page_end"] = last["meta"]["page_end"] or prev["meta"]["page_end"]
+                prev["meta"]["block_end"] = last["meta"]["block_end"]
+                if "table_index" in last["meta"] and "table_index" not in prev["meta"]:
+                    prev["meta"]["table_index"] = last["meta"]["table_index"]
+                out.pop()
+        return out
+
+    return merge_shorts(chunks)
+
+# ---- утилиты вывода/конвертации ----
+
+def pretty_print_chunks(chunks: List[Dict[str, Any]]) -> None:
+    for i, ch in enumerate(chunks):
+        m = ch["meta"]
+        pages = f"{m.get('page_start')}–{m.get('page_end')}" if m.get("page_start") is not None else "?"
+        print(f"[Chunk {i}] path={m.get('path')} pages={pages} types={m.get('types')}")
+        if "table" in m.get("types", []):
+            ti = m.get("table_index")
+            if ti:
+                print(f"(Table #{ti})")
+        print(ch["text"])
+        print("-" * 80)
+
+def to_langchain_docs(chunks: List[Dict[str, Any]]):
     try:
-        model = SentenceTransformer("intfloat/multilingual-e5-base")
-        sentences = _split_sentences(text)
-        if not sentences:
-            return []
-        embeddings = model.encode(sentences, batch_size=32, normalize_embeddings=True)
+        from langchain.schema import Document
     except Exception:
-        LOGGER.exception("semantic_chunk_failed")
-        return _recursive_chunk(text, chunk_size, chunk_size // 5)
+        raise RuntimeError("Установи langchain: pip install langchain")
+    docs = []
+    for ch in chunks:
+        meta = dict(ch["meta"])
+        if isinstance(meta.get("types"), set):
+            meta["types"] = sorted(meta["types"])
+        docs.append(Document(page_content=ch["text"], metadata=meta))
+    return docs
 
-    boundaries = [0]
-    for idx in range(len(sentences) - 1):
-        similarity = float(embeddings[idx] @ embeddings[idx + 1])
-        if similarity < 0.55:
-            boundaries.append(idx + 1)
-    boundaries.append(len(sentences))
+# === доп. утилита: отчёт по длинам чанков ===
+def print_chunk_lengths(chunks):
+    rows = []
+    max_tokens = 1
+    for i, ch in enumerate(chunks):
+        txt = ch.get("text", "")
+        meta = ch.get("meta", {}) or {}
+        tok = tlen(txt)
+        max_tokens = max(max_tokens, tok)
+        rows.append({
+            "index": i,
+            "tokens": tok,
+            "chars": len(txt),
+            "types": meta.get("types"),
+            "pages": (meta.get("page_start"), meta.get("page_end")),
+            "table_index": meta.get("table_index"),
+        })
 
-    chunks: List[str] = []
-    i = 0
-    while i < len(boundaries) - 1:
-        start = boundaries[i]
-        end = boundaries[i + 1]
-        candidate = " ".join(sentences[start:end]).strip()
-        while end < len(sentences) and len(candidate) < chunk_size:
-            end += 1
-            candidate = " ".join(sentences[start:end]).strip()
-        chunks.append(candidate)
-        i += 1
-    return chunks
+    print("Chunk lengths (tokens / chars):\n")
+    for r in rows:
+        bar_len = max(1, int(30 * r["tokens"] / max_tokens))
+        pages = f"{r['pages'][0]}–{r['pages'][1]}" if r["pages"][0] is not None else "?"
+        tinfo = f"(Table #{r['table_index']})" if r.get("table_index") else ""
+        over = "  [>HARD_MAX]" if r["tokens"] > HARD_MAX else ""
+        print(f"[Chunk {r['index']:>3}] {r['tokens']:>4} tok / {r['chars']:>5} ch  "
+              f"types={r['types']}  pages={pages} {tinfo}{over}\n"
+              f"{'#' * bar_len}\n")
 
-
-__all__ = ["chunk_text", "Chunk"]
+    toks = [r["tokens"] for r in rows]
+    if toks:
+        print(f"Total chunks: {len(rows)} | tokens: min={min(toks)}, max={max(toks)}, avg={sum(toks)//len(toks)}")
+    return rows
+# ===================== /Token-aware Docling chunker =====================

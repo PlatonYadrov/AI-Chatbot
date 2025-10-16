@@ -16,7 +16,7 @@ from langchain.embeddings.base import Embeddings
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
-from processors.chunker import chunk_text
+from processors.chunker import chunk_docling_token_packer
 from processors.docling_chunker import DoclingChunker, DoclingChunk
 from processors.deduplicator import deduplicate_chunks
 from parsers.docling_parser import DoclingParser
@@ -201,7 +201,9 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                     cache_dir=os.getenv("DOCLING_CACHE_DIR"),
                     use_vlm=os.getenv("DOCLING_USE_VLM", "false").lower() == "true",  # VLM off by default
                 )
-                parser_blocks = list(parser.parse(str(tmp_path), doc_id=doc_id))
+                print(f"ocr_enabled: {os.getenv('DOCLING_OCR_ENABLED', 'true').lower() == 'true'}")
+                doc, md_text = parser.parse_to_document(str(tmp_path), doc_id=doc_id, markdown=True)
+                # parser_blocks = list(parser.parse(str(tmp_path), doc_id=doc_id))
             else:
                 # Fallback for unsupported formats: treat as plain text
                 LOGGER.info("fallback_text_parser", extra={"suffix": suffix, "path": str(tmp_path)})
@@ -261,20 +263,21 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         
         # Strategy 2: Traditional chunking (fallback or default)
         if not chunk_dicts:
-            for i, block in enumerate(parser_blocks):
-                # Docling provides pre-cleaned text, no additional normalization needed
-                if not block.text or not block.text.strip():
-                    continue
+            chunk_dicts = chunk_docling_token_packer(doc, doc_id=doc_id, src_path=str(tmp_path))
+            # for i, block in enumerate(parser_blocks):
+            #     # Docling provides pre-cleaned text, no additional normalization needed
+            #     if not block.text or not block.text.strip():
+            #         continue
 
-                print(f"\n=== Block {i} Debug ===")
-                print(f"Block text length: {len(block.text)}")
-                print(f"Block meta: {block.meta}")
-                print(f"Block attributes: {[attr for attr in dir(block) if not attr.startswith('_')]}")
-                merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
-                for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
-                    chunk_dicts.append(chunk.to_dict())
-                    print("============================")
-                    print(f"[Chunk {len(chunk_dicts)}] {chunk.text}")
+            #     print(f"\n=== Block {i} Debug ===")
+            #     print(f"Block text length: {len(block.text)}")
+            #     print(f"Block meta: {block.meta}")
+            #     print(f"Block attributes: {[attr for attr in dir(block) if not attr.startswith('_')]}")
+            #     merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
+            #     for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
+            #         chunk_dicts.append(chunk.to_dict())
+            #         print("============================")
+            #         print(f"[Chunk {len(chunk_dicts)}] {chunk.text}")
             
             LOGGER.info(
                 "traditional_chunking_complete",
@@ -304,7 +307,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         # Model will automatically truncate inputs to max context length
         texts = [c["text"] for c in unique_chunks]
         
-        metadatas = [c["metadata"] for c in unique_chunks]
+        metadatas = [c["meta"] for c in unique_chunks]
 
         try:
             start_qdrant = time.time()
@@ -324,12 +327,8 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                 # Use deterministic UUID based on chunk identity to satisfy Qdrant ID constraints
                 raw_id = meta.get("chunk_id") or "_".join(
                     [
-                        str(meta.get("doc_id", "")),
-                        str(meta.get("language", "")),
-                        str(meta.get("type", "")),
-                        str(meta.get("path", "")),
-                        str(meta.get("source_uri", "")),
-                        str(meta.get("chunk_index", "0")),
+                        str(meta.get("block_start", "")),
+                        str(meta.get("block_end", "")),
                     ]
                 )
                 pid = str(uuid.uuid5(uuid.NAMESPACE_URL, raw_id))

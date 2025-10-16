@@ -357,7 +357,7 @@ class DoclingParser(BaseParser):
               (без явных format_options), чтобы не зависеть от внутренних классов опций.
         """
         from docling.document_converter import DocumentConverter, PdfFormatOption
-        from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode, TesseractCliOcrOptions
         from docling.datamodel.base_models import InputFormat
         from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
@@ -368,6 +368,11 @@ class DoclingParser(BaseParser):
             pipeline_options = PdfPipelineOptions()
             pipeline_options.do_ocr = self.ocr_enabled
             pipeline_options.do_table_structure = self.extract_tables
+            if self.ocr_enabled:
+                pipeline_options.ocr_options = TesseractCliOcrOptions(
+                    force_full_page_ocr=False,
+                    lang=["rus", "eng"],
+                )
 
             if self.extract_tables:
                 pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
