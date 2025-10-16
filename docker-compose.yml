@@ -15,7 +15,7 @@ services:
     environment:
       # Docling local configuration
       - DOCLING_OFFLINE_MODE=true
-      - DOCLING_OCR_ENABLED=false
+      - DOCLING_OCR_ENABLED=true
       - DOCLING_EXTRACT_TABLES=true
       - DOCLING_CACHE_DIR=/app/.cache/huggingface
       - HF_HOME=/app/.cache/huggingface

@@ -218,7 +218,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             LOGGER.exception("parse_failed", extra={"path": str(tmp_path), "suffix": suffix})
             raise HTTPException(status_code=500, detail="Parsing failed")
 
-        if not parser_blocks:
+        if not md_text:
             LOGGER.warning("no_blocks filename=%s suffix=%s", filename, suffix)
             raise HTTPException(status_code=400, detail="Parser produced no content")
 
