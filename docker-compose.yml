@@ -65,18 +65,21 @@ services:
     image: vllm/vllm-openai:v0.10.0
     environment:
       - VLLM_USE_V1=0
-      - CUDA_VISIBLE_DEVICES=0,1  # vLLM uses both GPUs (L4 24GB each)
+      - CUDA_VISIBLE_DEVICES=0,1
     command: >-
-      --model cognitivecomputations/Qwen3-30B-A3B-AWQ
-      --max-model-len 8000
+      --model Qwen/Qwen2.5-14B-Instruct-AWQ
+      --quantization awq
+      --tensor-parallel-size 2
       --dtype half
-      --gpu-memory-utilization 0.92
+      --rope-theta 1000000
+      --rope-scaling '{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}'
+      --max-model-len 65536
+      --gpu-memory-utilization 0.90
       --disable-log-requests
       --no-enable-prefix-caching
-      --tensor-parallel-size 2
       --download-dir /root/.cache
-      --max-num-seqs 64
-      --max-num-batched-tokens 8192
+      --max-num-seqs 24
+      --max-num-batched-tokens 4096
     ports:
       - "8000:8000"
     shm_size: 32g
