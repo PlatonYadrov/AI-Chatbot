@@ -3,7 +3,12 @@ uvicorn==0.29.0
 requests==2.32.3
 langchain==0.2.6
 langchain-community==0.2.6
+langchain-core==0.2.10
 qdrant-client==1.9.1
+
+# Для диалогового чатбота с сессиями
+# Зачем: Работа с датами и временем для TTL сессий
+python-dateutil>=2.8.2
 
 # LangChain reranking components (already included in langchain-community)
 # No additional dependencies needed for LangChain-based reranking

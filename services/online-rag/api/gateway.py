@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
@@ -21,6 +21,11 @@ try:
 except ImportError as e:
     logging.warning(f"Reranking not available: {e}")
     RERANKING_AVAILABLE = False
+
+# Import chat components for conversational RAG
+# Зачем: Добавляем диалоговый режим с уточняющими вопросами
+from chat.session_manager import SessionManager, ChatSession
+from chat.clarification_service import ClarificationService
 
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -158,6 +163,7 @@ class TEIEmbeddings(Embeddings):
 
 
 class QueryRequest(BaseModel):
+    """Модель запроса для обычного RAG (без диалога)."""
     query: str
     k: int = 4
     include_vectors: bool = False
@@ -166,7 +172,42 @@ class QueryRequest(BaseModel):
     rerank_top_k: Optional[int] = None
 
 
+class ChatRequest(BaseModel):
+    """
+    Модель запроса для диалогового RAG с уточняющими вопросами.
+    
+    Зачем: Поддержка сессий и уточнений для более точных ответов.
+    """
+    query: str
+    session_id: Optional[str] = None  # ID сессии для продолжения диалога
+    skip_clarification: bool = False  # Пропустить уточнения (сразу ответить)
+    clarification_answers: Optional[Dict[str, str]] = None  # Ответы на уточняющие вопросы
+    k: int = 4  # Количество документов для поиска
+    use_reranking: bool = True  # Использовать реранкинг
+    rerank_top_k: Optional[int] = None  # Количество документов после реранкинга
+
+
+class ChatResponse(BaseModel):
+    """
+    Модель ответа для диалогового RAG.
+    
+    Зачем: Структурированный ответ с поддержкой уточнений и истории.
+    """
+    session_id: str  # ID сессии для продолжения
+    state: str  # "awaiting_clarification" или "completed"
+    clarification_questions: Optional[List[str]] = None  # Уточняющие вопросы (если нужны)
+    clarification_priorities: Optional[List[str]] = None  # Приоритеты вопросов
+    answer: Optional[str] = None  # Финальный ответ (если state="completed")
+    sources: Optional[List[Dict]] = None  # Источники (если state="completed")
+    conversation_history: List[Dict] = []  # История диалога
+
+
 app = FastAPI(title="RAG Gateway")
+
+# Инициализация сервисов для диалогового режима
+# Зачем: Создаем глобальные экземпляры для управления сессиями и уточнениями
+session_manager = SessionManager()
+clarification_service = ClarificationService()
 
 
 @app.post("/query")
@@ -296,3 +337,256 @@ def query_endpoint(req: QueryRequest):
             pass
 
     return {"answer": answer, "thoughts": thoughts, "sources": sources}
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat_endpoint(req: ChatRequest):
+    """
+    Диалоговый RAG endpoint с поддержкой уточняющих вопросов.
+    
+    Зачем: Улучшает качество ответов, запрашивая уточнения для расплывчатых запросов.
+    
+    Поток работы:
+    1. Первый запрос: Анализ нужны ли уточнения → возврат вопросов
+    2. Второй запрос (с ответами): Генерация финального ответа с учетом уточнений
+    
+    Args:
+        req: ChatRequest с запросом и опциональными уточнениями
+    
+    Returns:
+        ChatResponse с вопросами или финальным ответом
+    """
+    
+    # Получаем или создаем сессию
+    # Зачем: Сохраняем контекст диалога между запросами
+    session = session_manager.get_or_create_session(req.session_id)
+    session.add_message("user", req.query)
+    
+    # Обрабатываем ответы на уточняющие вопросы (если есть)
+    # Зачем: Сохраняем уточнения для расширения запроса
+    if req.clarification_answers:
+        for question, answer in req.clarification_answers.items():
+            session.add_clarification(question, answer)
+            session.add_message("clarification", f"Q: {question}\nA: {answer}")
+    
+    # Проверяем нужны ли уточнения (если не пропущено явно)
+    # Зачем: Определяем достаточно ли информации для качественного ответа
+    if (not req.skip_clarification and 
+        session.state == "initial" and 
+        not req.clarification_answers):
+        
+        # Анализируем запрос
+        conversation_context = session.get_conversation_context()
+        needs_clarification, reason, confidence = clarification_service.should_clarify(
+            req.query, 
+            conversation_context
+        )
+        
+        # Если нужны уточнения - генерируем вопросы
+        if needs_clarification and confidence > 0.6:  # Порог уверенности
+            logging.info(f"Требуются уточнения: {reason} (confidence={confidence})")
+            
+            # Генерируем 2-3 уточняющих вопроса
+            questions, priorities = clarification_service.generate_clarification_questions(
+                req.query,
+                conversation_context,
+                num_questions=3
+            )
+            
+            session.set_pending_questions(questions)
+            session.add_message("assistant", f"Нужны уточнения: {reason}")
+            
+            return ChatResponse(
+                session_id=session.session_id,
+                state="awaiting_clarification",
+                clarification_questions=questions,
+                clarification_priorities=priorities,
+                conversation_history=[m for m in session.messages]
+            )
+    
+    # Расширяем запрос уточнениями (если есть)
+    # Зачем: Делаем запрос более конкретным для лучшего поиска
+    enhanced_query = req.query
+    if session.clarifications:
+        enhanced_query = clarification_service.enhance_query_with_clarifications(
+            req.query,
+            session.clarifications
+        )
+        logging.info(f"Запрос расширен {len(session.clarifications)} уточнениями")
+    
+    # === Выполняем RAG поиск (аналогично /query endpoint) ===
+    
+    embeddings = TEIEmbeddings()
+    vs = CustomQdrant.from_existing_collection(
+        embedding=embeddings,
+        collection_name=QDRANT_COLLECTION,
+        url=QDRANT_URL,
+        prefer_grpc=False,
+        path=None,
+    )
+    
+    # Начальный поиск (больше кандидатов если используем реранкинг)
+    initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
+    docs = vs.similarity_search(enhanced_query, k=initial_k)
+    
+    # Фильтруем валидные документы
+    docs = [doc for doc in docs if doc and doc.page_content and doc.page_content.strip()]
+    
+    if not docs:
+        session.add_message("assistant", "Информация не найдена")
+        return ChatResponse(
+            session_id=session.session_id,
+            state="completed",
+            answer="Извините, не удалось найти релевантную информацию для вашего запроса.",
+            sources=[],
+            conversation_history=[m for m in session.messages]
+        )
+    
+    # Применяем реранкинг (если включен)
+    if req.use_reranking and RERANKING_AVAILABLE and docs:
+        try:
+            candidates = []
+            for d in docs:
+                meta = getattr(d, 'metadata', {}) or {}
+                if hasattr(d, 'page_content') and d.page_content:
+                    meta = {**meta, 'text': d.page_content}
+                candidates.append(meta)
+            
+            rerank_k = req.rerank_top_k or req.k
+            reranked_candidates = rerank_candidates(enhanced_query, candidates, top_k=rerank_k)
+            
+            if reranked_candidates:
+                docs = docs[:len(reranked_candidates)]
+            else:
+                docs = docs[:req.k]
+                
+        except Exception as e:
+            logging.error(f"Reranking failed: {e}")
+            docs = docs[:req.k]
+    elif not req.use_reranking or not RERANKING_AVAILABLE:
+        docs = docs[:req.k]
+    
+    # Строим контекст
+    context_parts = []
+    for d in docs:
+        if hasattr(d, 'page_content') and d.page_content and d.page_content.strip():
+            context_parts.append(d.page_content.strip())
+    
+    if not context_parts:
+        session.add_message("assistant", "Контекст не найден")
+        return ChatResponse(
+            session_id=session.session_id,
+            state="completed",
+            answer="Извините, не удалось найти релевантную информацию.",
+            sources=[],
+            conversation_history=[m for m in session.messages]
+        )
+    
+    context = "\n\n".join(context_parts)
+    
+    # Строим промпт с учетом истории диалога
+    # Зачем: LLM видит предыдущие сообщения и уточнения
+    conversation_history = session.get_conversation_context()
+    clarifications_text = session.get_clarifications_text()
+    
+    prompt = f"""Ответь на вопрос используя контекст и историю диалога.
+
+История диалога:
+{conversation_history}
+
+{f"Уточнения от пользователя:\n{clarifications_text}\n" if clarifications_text else ""}
+
+Контекст из базы знаний:
+{context}
+
+Текущий вопрос: {req.query}
+
+Предоставь развернутый и точный ответ на основе контекста и предыдущего диалога."""
+    
+    # Генерируем ответ
+    answer, thoughts = generate_response(prompt, max_tokens=800)
+    session.add_message("assistant", answer)
+    
+    # Собираем источники
+    sources = []
+    for d in docs:
+        meta = getattr(d, 'metadata', {}) or {}
+        text_content = getattr(d, 'page_content', '')
+        meta = {**meta, 'text': text_content}
+        sources.append(meta)
+    
+    return ChatResponse(
+        session_id=session.session_id,
+        state="completed",
+        answer=answer,
+        sources=sources,
+        conversation_history=[m for m in session.messages]
+    )
+
+
+@app.delete("/chat/{session_id}")
+def delete_chat_session(session_id: str):
+    """
+    Удалить сессию диалога.
+    
+    Зачем: Позволяет пользователю явно завершить диалог и очистить историю.
+    
+    Args:
+        session_id: ID сессии для удаления
+    
+    Returns:
+        Статус удаления
+    """
+    session_manager.delete_session(session_id)
+    return {"status": "deleted", "session_id": session_id}
+
+
+@app.get("/chat/{session_id}")
+def get_chat_session(session_id: str):
+    """
+    Получить информацию о сессии диалога.
+    
+    Зачем: Позволяет просмотреть историю диалога и текущее состояние.
+    
+    Args:
+        session_id: ID сессии
+    
+    Returns:
+        Данные сессии
+    
+    Raises:
+        HTTPException: Если сессия не найдена
+    """
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session.to_dict()
+
+
+@app.get("/chat/stats")
+def get_chat_stats():
+    """
+    Получить статистику по всем сессиям.
+    
+    Зачем: Для мониторинга и отладки системы.
+    
+    Returns:
+        Статистика сессий
+    """
+    return session_manager.get_stats()
+
+
+@app.post("/chat/cleanup")
+def cleanup_expired_sessions():
+    """
+    Очистить истекшие сессии.
+    
+    Зачем: Периодическая очистка памяти от неактивных сессий.
+    Рекомендуется вызывать по расписанию (например, каждые 10 минут).
+    
+    Returns:
+        Результат очистки
+    """
+    session_manager.cleanup_expired()
+    stats = session_manager.get_stats()
+    return {"status": "cleaned", "current_sessions": stats["total_sessions"]}
