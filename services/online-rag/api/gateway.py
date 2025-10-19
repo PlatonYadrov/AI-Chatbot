@@ -489,13 +489,16 @@ def chat_endpoint(req: ChatRequest):
     conversation_history = session.get_conversation_context()
     clarifications_text = session.get_clarifications_text()
     
+    # Формируем секцию с уточнениями (если есть)
+    clarifications_section = ""
+    if clarifications_text:
+        clarifications_section = f"\nУточнения от пользователя:\n{clarifications_text}\n"
+    
     prompt = f"""Ответь на вопрос используя контекст и историю диалога.
 
 История диалога:
 {conversation_history}
-
-{f"Уточнения от пользователя:\n{clarifications_text}\n" if clarifications_text else ""}
-
+{clarifications_section}
 Контекст из базы знаний:
 {context}
 

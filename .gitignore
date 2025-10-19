@@ -365,3 +365,8 @@ api_keys/
 *.env.production
 
 
+# ================================
+# Global ignores: Shell and Markdown
+# ================================
+*.sh
+*.md
