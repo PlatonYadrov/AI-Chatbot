@@ -200,6 +200,9 @@ class ChatResponse(BaseModel):
     answer: Optional[str] = None  # Финальный ответ (если state="completed")
     sources: Optional[List[Dict]] = None  # Источники (если state="completed")
     conversation_history: List[Dict] = []  # История диалога
+    
+    # 🆕 Метаданные процесса принятия решений
+    metadata: Optional[Dict] = None  # Подробная информация о процессе
 
 
 app = FastAPI(title="RAG Gateway")
@@ -357,6 +360,15 @@ def chat_endpoint(req: ChatRequest):
         ChatResponse с вопросами или финальным ответом
     """
     
+    # 🆕 Инициализируем метаданные для отслеживания процесса
+    import time
+    start_time = time.time()
+    metadata = {
+        "decision_process": {},
+        "rag_pipeline": {},
+        "timing": {}
+    }
+    
     # Получаем или создаем сессию
     # Зачем: Сохраняем контекст диалога между запросами
     session = session_manager.get_or_create_session(req.session_id)
@@ -368,6 +380,9 @@ def chat_endpoint(req: ChatRequest):
         for question, answer in req.clarification_answers.items():
             session.add_clarification(question, answer)
             session.add_message("clarification", f"Q: {question}\nA: {answer}")
+        
+        metadata["decision_process"]["clarifications_provided"] = len(req.clarification_answers)
+        metadata["decision_process"]["clarifications"] = req.clarification_answers
     
     # Проверяем нужны ли уточнения (если не пропущено явно)
     # Зачем: Определяем достаточно ли информации для качественного ответа
@@ -376,22 +391,42 @@ def chat_endpoint(req: ChatRequest):
         not req.clarification_answers):
         
         # Анализируем запрос
+        clarification_start = time.time()
         conversation_context = session.get_conversation_context()
         needs_clarification, reason, confidence = clarification_service.should_clarify(
             req.query, 
             conversation_context
         )
+        clarification_time = time.time() - clarification_start
+        
+        # 🆕 Сохраняем информацию об анализе
+        metadata["decision_process"]["clarification_analysis"] = {
+            "needs_clarification": needs_clarification,
+            "reason": reason,
+            "confidence": confidence,
+            "threshold": 0.6,
+            "analysis_time_ms": round(clarification_time * 1000, 2)
+        }
         
         # Если нужны уточнения - генерируем вопросы
         if needs_clarification and confidence > 0.6:  # Порог уверенности
             logging.info(f"Требуются уточнения: {reason} (confidence={confidence})")
             
             # Генерируем 2-3 уточняющих вопроса
+            questions_start = time.time()
             questions, priorities = clarification_service.generate_clarification_questions(
                 req.query,
                 conversation_context,
                 num_questions=3
             )
+            questions_time = time.time() - questions_start
+            
+            metadata["decision_process"]["questions_generation"] = {
+                "num_questions": len(questions),
+                "priorities": priorities,
+                "generation_time_ms": round(questions_time * 1000, 2)
+            }
+            metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
             
             session.set_pending_questions(questions)
             session.add_message("assistant", f"Нужны уточнения: {reason}")
@@ -401,8 +436,15 @@ def chat_endpoint(req: ChatRequest):
                 state="awaiting_clarification",
                 clarification_questions=questions,
                 clarification_priorities=priorities,
-                conversation_history=[m for m in session.messages]
+                conversation_history=[m for m in session.messages],
+                metadata=metadata
             )
+        else:
+            # 🆕 Уточнения не нужны - продолжаем без них
+            metadata["decision_process"]["clarification_skipped"] = {
+                "reason": "Query is specific enough" if not needs_clarification else "Confidence below threshold",
+                "confidence": confidence
+            }
     
     # Расширяем запрос уточнениями (если есть)
     # Зачем: Делаем запрос более конкретным для лучшего поиска
@@ -413,9 +455,22 @@ def chat_endpoint(req: ChatRequest):
             session.clarifications
         )
         logging.info(f"Запрос расширен {len(session.clarifications)} уточнениями")
+        
+        # 🆕 Сохраняем информацию о расширении запроса
+        metadata["rag_pipeline"]["query_enhancement"] = {
+            "original_query": req.query,
+            "enhanced_query": enhanced_query,
+            "clarifications_used": len(session.clarifications)
+        }
+    else:
+        metadata["rag_pipeline"]["query_enhancement"] = {
+            "enhanced": False,
+            "reason": "No clarifications provided"
+        }
     
     # === Выполняем RAG поиск (аналогично /query endpoint) ===
     
+    search_start = time.time()
     embeddings = TEIEmbeddings()
     vs = CustomQdrant.from_existing_collection(
         embedding=embeddings,
@@ -428,9 +483,19 @@ def chat_endpoint(req: ChatRequest):
     # Начальный поиск (больше кандидатов если используем реранкинг)
     initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
     docs = vs.similarity_search(enhanced_query, k=initial_k)
+    search_time = time.time() - search_start
     
     # Фильтруем валидные документы
+    docs_before_filter = len(docs)
     docs = [doc for doc in docs if doc and doc.page_content and doc.page_content.strip()]
+    
+    # 🆕 Сохраняем информацию о поиске
+    metadata["rag_pipeline"]["vector_search"] = {
+        "initial_k": initial_k,
+        "documents_found": docs_before_filter,
+        "documents_after_filter": len(docs),
+        "search_time_ms": round(search_time * 1000, 2)
+    }
     
     if not docs:
         session.add_message("assistant", "Информация не найдена")
@@ -445,6 +510,7 @@ def chat_endpoint(req: ChatRequest):
     # Применяем реранкинг (если включен)
     if req.use_reranking and RERANKING_AVAILABLE and docs:
         try:
+            rerank_start = time.time()
             candidates = []
             for d in docs:
                 meta = getattr(d, 'metadata', {}) or {}
@@ -454,17 +520,44 @@ def chat_endpoint(req: ChatRequest):
             
             rerank_k = req.rerank_top_k or req.k
             reranked_candidates = rerank_candidates(enhanced_query, candidates, top_k=rerank_k)
+            rerank_time = time.time() - rerank_start
             
+            docs_before_rerank = len(docs)
             if reranked_candidates:
                 docs = docs[:len(reranked_candidates)]
             else:
                 docs = docs[:req.k]
+            
+            # 🆕 Сохраняем информацию о реранкинге
+            metadata["rag_pipeline"]["reranking"] = {
+                "enabled": True,
+                "method": "LangChain compression pipeline",
+                "candidates_before": docs_before_rerank,
+                "candidates_after": len(docs),
+                "target_k": rerank_k,
+                "rerank_time_ms": round(rerank_time * 1000, 2),
+                "success": len(reranked_candidates) > 0 if reranked_candidates else False
+            }
                 
         except Exception as e:
             logging.error(f"Reranking failed: {e}")
             docs = docs[:req.k]
+            
+            # 🆕 Сохраняем информацию об ошибке реранкинга
+            metadata["rag_pipeline"]["reranking"] = {
+                "enabled": True,
+                "method": "LangChain compression pipeline",
+                "error": str(e),
+                "fallback": "Using original order"
+            }
     elif not req.use_reranking or not RERANKING_AVAILABLE:
         docs = docs[:req.k]
+        
+        # 🆕 Реранкинг отключен
+        metadata["rag_pipeline"]["reranking"] = {
+            "enabled": False,
+            "reason": "Disabled by user" if not req.use_reranking else "Not available"
+        }
     
     # Строим контекст
     context_parts = []
@@ -507,8 +600,20 @@ def chat_endpoint(req: ChatRequest):
 Предоставь развернутый и точный ответ на основе контекста и предыдущего диалога."""
     
     # Генерируем ответ
+    generation_start = time.time()
     answer, thoughts = generate_response(prompt, max_tokens=800)
+    generation_time = time.time() - generation_start
     session.add_message("assistant", answer)
+    
+    # 🆕 Сохраняем информацию о генерации
+    metadata["rag_pipeline"]["generation"] = {
+        "model": "vLLM (Qwen2.5-14B-Instruct-AWQ)",
+        "max_tokens": 800,
+        "generation_time_ms": round(generation_time * 1000, 2),
+        "context_length": len(context),
+        "prompt_includes_history": len(conversation_history) > 0,
+        "prompt_includes_clarifications": len(clarifications_text) > 0
+    }
     
     # Собираем источники
     sources = []
@@ -518,12 +623,27 @@ def chat_endpoint(req: ChatRequest):
         meta = {**meta, 'text': text_content}
         sources.append(meta)
     
+    # 🆕 Финальная статистика
+    metadata["rag_pipeline"]["final_stats"] = {
+        "sources_used": len(sources),
+        "context_chunks": len(context_parts),
+        "total_context_length": len(context)
+    }
+    
+    metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+    metadata["timing"]["breakdown"] = {
+        "search": metadata["rag_pipeline"]["vector_search"]["search_time_ms"],
+        "reranking": metadata["rag_pipeline"]["reranking"].get("rerank_time_ms", 0),
+        "generation": metadata["rag_pipeline"]["generation"]["generation_time_ms"]
+    }
+    
     return ChatResponse(
         session_id=session.session_id,
         state="completed",
         answer=answer,
         sources=sources,
-        conversation_history=[m for m in session.messages]
+        conversation_history=[m for m in session.messages],
+        metadata=metadata
     )
 
 
