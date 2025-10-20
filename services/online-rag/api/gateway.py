@@ -390,12 +390,50 @@ def chat_endpoint(req: ChatRequest):
         session.state == "initial" and 
         not req.clarification_answers):
         
-        # Анализируем запрос
+        # 🆕 ШАГ 1: Выполняем предварительный векторный поиск для получения контекста из БД
+        # Зачем: Анализ уточнений и генерация вопросов будут основаны на реальных данных из БД
+        logging.info("Выполняем предварительный поиск в БД для анализа уточнений")
+        kb_search_start = time.time()
+        
+        try:
+            # Ищем небольшое количество документов для контекста (не нужно много)
+            kb_docs = vs.similarity_search(req.query, k=5)
+            
+            # Фильтруем пустые документы
+            kb_docs = [doc for doc in kb_docs if doc.page_content and doc.page_content.strip()]
+            
+            # Формируем полный контекст из найденных документов
+            kb_context_parts = []
+            for i, doc in enumerate(kb_docs[:5], 1):  # Максимум 5 документов
+                # Берем ВЕСЬ текст документа для более точного анализа
+                content = doc.page_content.strip()
+                if content:
+                    kb_context_parts.append(f"Документ {i}:\n{content}")
+            
+            knowledge_base_context = "\n\n".join(kb_context_parts) if kb_context_parts else ""
+            kb_docs_count = len(kb_docs)
+            
+        except Exception as e:
+            logging.error(f"Ошибка при предварительном поиске в БД: {e}")
+            knowledge_base_context = ""
+            kb_docs_count = 0
+        
+        kb_search_time = time.time() - kb_search_start
+        
+        # Сохраняем информацию о предварительном поиске
+        metadata["decision_process"]["knowledge_base_search"] = {
+            "documents_found": kb_docs_count,
+            "search_time_ms": round(kb_search_time * 1000, 2),
+            "context_length": len(knowledge_base_context)
+        }
+        
+        # 🆕 ШАГ 2: Анализируем запрос с учетом контекста из БД
         clarification_start = time.time()
         conversation_context = session.get_conversation_context()
         needs_clarification, reason, confidence = clarification_service.should_clarify(
             req.query, 
-            conversation_context
+            conversation_context,
+            knowledge_base_context  # ← Передаем контекст из БД!
         )
         clarification_time = time.time() - clarification_start
         
@@ -405,18 +443,20 @@ def chat_endpoint(req: ChatRequest):
             "reason": reason,
             "confidence": confidence,
             "threshold": 0.6,
-            "analysis_time_ms": round(clarification_time * 1000, 2)
+            "analysis_time_ms": round(clarification_time * 1000, 2),
+            "used_kb_context": kb_docs_count > 0  # Был ли использован контекст из БД
         }
         
-        # Если нужны уточнения - генерируем вопросы
+        # 🆕 ШАГ 3: Если нужны уточнения - генерируем вопросы на основе контекста из БД
         if needs_clarification and confidence > 0.6:  # Порог уверенности
             logging.info(f"Требуются уточнения: {reason} (confidence={confidence})")
             
-            # Генерируем 2-3 уточняющих вопроса
+            # Генерируем 2-3 уточняющих вопроса с учетом контекста из БД
             questions_start = time.time()
             questions, priorities = clarification_service.generate_clarification_questions(
                 req.query,
                 conversation_context,
+                knowledge_base_context,  # ← Передаем контекст из БД!
                 num_questions=3
             )
             questions_time = time.time() - questions_start
@@ -424,7 +464,8 @@ def chat_endpoint(req: ChatRequest):
             metadata["decision_process"]["questions_generation"] = {
                 "num_questions": len(questions),
                 "priorities": priorities,
-                "generation_time_ms": round(questions_time * 1000, 2)
+                "generation_time_ms": round(questions_time * 1000, 2),
+                "used_kb_context": kb_docs_count > 0  # Был ли использован контекст из БД
             }
             metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
             
