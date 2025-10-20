@@ -51,18 +51,16 @@ services:
       - qdrant
       - reranker
   reranker:
-    # Using HuggingFace TEI for reranking (no SELinux issues, production-ready)
-    image: ghcr.io/huggingface/text-embeddings-inference:1.5
-    command: >-
-      --model-id BAAI/bge-reranker-v2-m3
-      --dtype float16
-      --pooling cls
-      --max-concurrent-requests 512
-      --max-batch-tokens 16384
+    # Custom reranker service using sentence-transformers (reliable, works everywhere)
+    build:
+      context: ./services/reranker
+      dockerfile: Dockerfile
+    env_file:
+      - ./configs/dev.env
     ports:
-      - "0.0.0.0:8081:80"
+      - "0.0.0.0:8081:8081"
     volumes:
-      - hf_cache:/data
+      - hf_cache:/app/.cache
     deploy:
       resources:
         reservations:
@@ -71,7 +69,7 @@ services:
               device_ids: ['1']
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
       interval: 30s
       timeout: 10s
       retries: 3
