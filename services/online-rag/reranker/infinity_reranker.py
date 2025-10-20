@@ -81,7 +81,7 @@ class InfinityReranker:
         """
         self.base_url = (
             base_url or 
-            os.getenv("RERANKER_URL", "http://reranker:80")
+            os.getenv("RERANKER_URL", "http://reranker:8081")
         ).rstrip("/")
         self.model_name = model_name
         self.timeout = timeout
@@ -341,7 +341,7 @@ def get_infinity_reranker() -> InfinityReranker:
     Get or create global Infinity reranker instance.
     
     Environment variables:
-        RERANKER_URL: Infinity service URL (default: http://reranker:7997)
+        RERANKER_URL: Infinity service URL (default: http://reranker:8081)
         RERANKER_MODEL: Model name for logging (default: BAAI/bge-reranker-v2-m3)
         RERANKER_TIMEOUT: Request timeout in seconds (default: 30)
     
@@ -350,7 +350,7 @@ def get_infinity_reranker() -> InfinityReranker:
     """
     global _reranker_instance
     if _reranker_instance is None:
-        base_url = os.getenv("RERANKER_URL", "http://reranker:7997")
+        base_url = os.getenv("RERANKER_URL", "http://reranker:8081")
         model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
         timeout = int(os.getenv("RERANKER_TIMEOUT", "30"))
         
