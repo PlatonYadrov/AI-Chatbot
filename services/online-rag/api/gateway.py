@@ -7,6 +7,9 @@ from typing import List, Optional, Dict
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -16,11 +19,16 @@ from generation.llm_service import generate_response
 
 # Import reranking service
 try:
-    from reranker.cross_encoder_service import rerank_candidates
+    from reranker.cross_encoder_service import (
+        rerank_candidates,
+        get_reranking_info as get_reranking_info_impl  # Rename to avoid conflict with endpoint
+    )
     RERANKING_AVAILABLE = True
+    logger.info("✅ Reranking service imported successfully")
 except ImportError as e:
-    logging.warning(f"Reranking not available: {e}")
+    logger.warning(f"⚠️  Reranking not available: {e}")
     RERANKING_AVAILABLE = False
+    get_reranking_info_impl = None
 
 # Import chat components for conversational RAG
 # Зачем: Добавляем диалоговый режим с уточняющими вопросами
@@ -255,16 +263,21 @@ def query_endpoint(req: QueryRequest):
             
             # Rerank candidates
             rerank_k = req.rerank_top_k or req.k
+            logger.info(f"🔄 Calling reranker for {len(candidates)} candidates...")
             reranked_candidates = rerank_candidates(req.query, candidates, top_k=rerank_k)
             
             # Update docs with reranked order
             if reranked_candidates:
                 docs = docs[:len(reranked_candidates)]  # Keep original docs but limit to reranked count
+                # Log reranking details
+                if reranked_candidates and isinstance(reranked_candidates[0], dict):
+                    rerank_method = reranked_candidates[0].get('rerank_method', 'unknown')
+                    rerank_model = reranked_candidates[0].get('rerank_model', 'unknown')
+                    logger.info(f"✅ Reranking completed: {len(candidates)} -> {len(reranked_candidates)} candidates")
+                    logger.info(f"   Method: {rerank_method}, Model: {rerank_model}")
             else:
-                logging.warning("Reranking returned no candidates, using original docs")
+                logger.warning("⚠️  Reranking returned no candidates, using original docs")
                 docs = docs[:req.k]
-            
-            logging.info(f"Reranking applied: {len(candidates)} -> {len(reranked_candidates)} candidates")
             
         except Exception as e:
             logging.error(f"Reranking failed, using original order: {e}")
@@ -573,19 +586,31 @@ def chat_endpoint(req: ChatRequest):
                 candidates.append(meta)
             
             rerank_k = req.rerank_top_k or req.k
+            logger.info(f"🔄 Calling reranker for {len(candidates)} candidates...")
             reranked_candidates = rerank_candidates(enhanced_query, candidates, top_k=rerank_k)
             rerank_time = time.time() - rerank_start
             
             docs_before_rerank = len(docs)
+            rerank_method = "unknown"
+            rerank_model = "unknown"
+            
             if reranked_candidates:
                 docs = docs[:len(reranked_candidates)]
+                # Extract reranking metadata
+                if isinstance(reranked_candidates[0], dict):
+                    rerank_method = reranked_candidates[0].get('rerank_method', 'unknown')
+                    rerank_model = reranked_candidates[0].get('rerank_model', 'unknown')
+                logger.info(f"✅ Reranking completed: {docs_before_rerank} -> {len(docs)} candidates")
+                logger.info(f"   Method: {rerank_method}, Model: {rerank_model}")
             else:
                 docs = docs[:req.k]
+                logger.warning("⚠️  Reranking returned no candidates")
             
             # 🆕 Сохраняем информацию о реранкинге
             metadata["rag_pipeline"]["reranking"] = {
                 "enabled": True,
-                "method": "LangChain compression pipeline",
+                "method": rerank_method,
+                "model": rerank_model,
                 "candidates_before": docs_before_rerank,
                 "candidates_after": len(docs),
                 "target_k": rerank_k,
@@ -767,3 +792,91 @@ def cleanup_expired_sessions():
     session_manager.cleanup_expired()
     stats = session_manager.get_stats()
     return {"status": "cleaned", "current_sessions": stats["total_sessions"]}
+
+
+@app.get("/reranker/info")
+def get_reranker_info_endpoint():
+    """
+    Получить информацию о текущем реранкере.
+    
+    Показывает:
+        - Какой реранкер используется (Infinity/Local/Fallback)
+        - Доступность сервиса
+        - Модель
+        - Метод инференса
+    
+    Returns:
+        Информация о реранкере
+    """
+    if not RERANKING_AVAILABLE or get_reranking_info_impl is None:
+        return {
+            "available": False,
+            "method": "none",
+            "error": "Reranking service not imported"
+        }
+    
+    try:
+        info = get_reranking_info_impl()
+        return {
+            "available": True,
+            "info": info
+        }
+    except Exception as e:
+        logger.error(f"Failed to get reranker info: {e}")
+        return {
+            "available": False,
+            "method": "unknown",
+            "error": str(e)
+        }
+
+
+@app.get("/health")
+def health_check():
+    """
+    Проверка здоровья сервиса и его зависимостей.
+    
+    Проверяет:
+        - Qdrant подключение
+        - LLM доступность
+        - Reranker статус
+    
+    Returns:
+        Статус сервиса и зависимостей
+    """
+    health_status = {
+        "service": "online-rag",
+        "status": "healthy",
+        "components": {}
+    }
+    
+    # Check Qdrant
+    try:
+        embeddings = TEIEmbeddings()
+        vs = CustomQdrant.from_existing_collection(
+            embedding=embeddings,
+            collection_name=QDRANT_COLLECTION,
+            url=QDRANT_URL,
+            prefer_grpc=False,
+            path=None,
+        )
+        health_status["components"]["qdrant"] = {"status": "healthy", "url": QDRANT_URL}
+    except Exception as e:
+        health_status["components"]["qdrant"] = {"status": "unhealthy", "error": str(e)}
+        health_status["status"] = "degraded"
+    
+    # Check Reranker
+    if RERANKING_AVAILABLE and get_reranking_info_impl:
+        try:
+            reranker_info = get_reranking_info_impl()
+            health_status["components"]["reranker"] = {
+                "status": "healthy" if reranker_info.get("service_available", False) else "unavailable",
+                "method": reranker_info.get("method", "unknown"),
+                "model": reranker_info.get("model_name", "unknown"),
+                "inference_location": reranker_info.get("inference_location", "unknown")
+            }
+        except Exception as e:
+            health_status["components"]["reranker"] = {"status": "error", "error": str(e)}
+    else:
+        health_status["components"]["reranker"] = {"status": "not_imported"}
+    
+    return health_status

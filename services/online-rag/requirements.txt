@@ -5,16 +5,20 @@ langchain==0.2.6
 langchain-community==0.2.6
 langchain-core==0.2.10
 qdrant-client==1.9.1
-
-# Для диалогового чатбота с сессиями
-# Зачем: Работа с датами и временем для TTL сессий
 python-dateutil>=2.8.2
 
-# LangChain reranking components (already included in langchain-community)
-# No additional dependencies needed for LangChain-based reranking
+# Logging and caching
+redis>=5.0.0
+loguru>=0.7.0
 
-# Optional: For advanced reranking with external models
-# sentence-transformers>=2.2.2
-# torch>=1.9.0
-# numpy>=1.21.0
+# ✅ Cross-Encoder reranking via Infinity container (no torch needed in Python!)
+# All heavy ML inference happens in the Infinity container
+# torch, transformers, sentence-transformers are NOT required here
+
+# Optional: Uncomment if you want local fallback reranking with torch
+# (Not recommended - use Infinity container instead)
+# sentence-transformers>=2.7.0
+# torch>=2.0.0
+# numpy>=1.24.0
+# transformers>=4.35.0
 
