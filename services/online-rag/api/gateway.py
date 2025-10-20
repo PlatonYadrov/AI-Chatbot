@@ -369,6 +369,17 @@ def chat_endpoint(req: ChatRequest):
         "timing": {}
     }
     
+    # Инициализируем embeddings и vector store для поиска в БД
+    # Зачем: Нужны для предварительного поиска контекста и основного RAG
+    embeddings = TEIEmbeddings()
+    vs = CustomQdrant.from_existing_collection(
+        embedding=embeddings,
+        collection_name=QDRANT_COLLECTION,
+        url=QDRANT_URL,
+        prefer_grpc=False,
+        path=None,
+    )
+    
     # Получаем или создаем сессию
     # Зачем: Сохраняем контекст диалога между запросами
     session = session_manager.get_or_create_session(req.session_id)
@@ -397,10 +408,13 @@ def chat_endpoint(req: ChatRequest):
         
         try:
             # Ищем небольшое количество документов для контекста (не нужно много)
+            logging.info(f"Поиск в БД для запроса: '{req.query}'")
             kb_docs = vs.similarity_search(req.query, k=5)
+            logging.info(f"Найдено документов до фильтрации: {len(kb_docs)}")
             
             # Фильтруем пустые документы
             kb_docs = [doc for doc in kb_docs if doc.page_content and doc.page_content.strip()]
+            logging.info(f"Найдено документов после фильтрации: {len(kb_docs)}")
             
             # Формируем полный контекст из найденных документов
             kb_context_parts = []
@@ -409,12 +423,18 @@ def chat_endpoint(req: ChatRequest):
                 content = doc.page_content.strip()
                 if content:
                     kb_context_parts.append(f"Документ {i}:\n{content}")
+                    logging.info(f"Документ {i}: {len(content)} символов")
             
             knowledge_base_context = "\n\n".join(kb_context_parts) if kb_context_parts else ""
             kb_docs_count = len(kb_docs)
             
+            if kb_docs_count == 0:
+                logging.warning("⚠️ В БД не найдено документов для анализа уточнений!")
+            else:
+                logging.info(f"✅ Сформирован контекст из {kb_docs_count} документов, общая длина: {len(knowledge_base_context)} символов")
+            
         except Exception as e:
-            logging.error(f"Ошибка при предварительном поиске в БД: {e}")
+            logging.error(f"Ошибка при предварительном поиске в БД: {e}", exc_info=True)
             knowledge_base_context = ""
             kb_docs_count = 0
         
@@ -510,16 +530,9 @@ def chat_endpoint(req: ChatRequest):
         }
     
     # === Выполняем RAG поиск (аналогично /query endpoint) ===
+    # Примечание: embeddings и vs уже инициализированы в начале функции
     
     search_start = time.time()
-    embeddings = TEIEmbeddings()
-    vs = CustomQdrant.from_existing_collection(
-        embedding=embeddings,
-        collection_name=QDRANT_COLLECTION,
-        url=QDRANT_URL,
-        prefer_grpc=False,
-        path=None,
-    )
     
     # Начальный поиск (больше кандидатов если используем реранкинг)
     initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
