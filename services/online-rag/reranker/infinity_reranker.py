@@ -1,4 +1,11 @@
-"""Infinity-based reranker client (no torch dependency)."""
+"""TEI/Infinity-based reranker client (no torch dependency).
+
+Works with both:
+- HuggingFace Text Embeddings Inference (TEI) 1.5+ with reranking support
+- Infinity service
+
+Both use compatible API formats.
+"""
 
 import os
 import time
@@ -41,7 +48,11 @@ class RerankResult:
 
 class InfinityReranker:
     """
-    Reranker using Infinity inference service.
+    Reranker using TEI or Infinity inference service.
+    
+    Compatible with:
+        - HuggingFace Text Embeddings Inference (TEI) 1.5+ (recommended)
+        - Infinity service
     
     Features:
         - Zero torch dependency in Python code
@@ -49,6 +60,7 @@ class InfinityReranker:
         - Support for any cross-encoder model
         - Optimized batching and throughput
         - Easy model swapping via docker-compose
+        - No SELinux/AppArmor issues
     """
     
     def __init__(
@@ -69,7 +81,7 @@ class InfinityReranker:
         """
         self.base_url = (
             base_url or 
-            os.getenv("RERANKER_URL", "http://reranker:7997")
+            os.getenv("RERANKER_URL", "http://reranker:80")
         ).rstrip("/")
         self.model_name = model_name
         self.timeout = timeout
@@ -156,17 +168,19 @@ class InfinityReranker:
         
         logger.info(f"🔍 Reranking {len(texts)} candidates for query: '{query[:80]}...'")
         
-        # Call Infinity rerank API with retries
+        # Call TEI/Infinity rerank API with retries
         for attempt in range(self.max_retries):
             try:
                 inference_start = time.time()
                 
+                # TEI and Infinity use compatible API formats
                 response = requests.post(
                     f"{self.base_url}/rerank",
                     json={
                         "query": query,
-                        "documents": texts,
-                        "return_documents": False  # We already have them
+                        "texts": texts,  # TEI uses "texts"
+                        "truncate": True,
+                        "return_text": False  # We already have them
                     },
                     timeout=self.timeout
                 )

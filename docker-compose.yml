@@ -51,25 +51,18 @@ services:
       - qdrant
       - reranker
   reranker:
-    image: michaelf34/infinity:latest
-    # Fix for SELinux/AppArmor "cannot enable executable stack" error
-    # Uses torch backend to avoid ctranslate2 executable stack issues
-    security_opt:
-      - seccomp:unconfined
-      - apparmor:unconfined
+    # Using HuggingFace TEI for reranking (no SELinux issues, production-ready)
+    image: ghcr.io/huggingface/text-embeddings-inference:1.5
     command: >-
-      v2
       --model-id BAAI/bge-reranker-v2-m3
-      --engine torch
-      --backend torch
       --dtype float16
-      --batch-size 64
-      --device cuda
-      --port 7997
+      --pooling cls
+      --max-concurrent-requests 512
+      --max-batch-tokens 16384
     ports:
-      - "0.0.0.0:8081:7997"
+      - "0.0.0.0:8081:80"
     volumes:
-      - hf_cache:/app/.cache
+      - hf_cache:/data
     deploy:
       resources:
         reservations:
@@ -78,7 +71,7 @@ services:
               device_ids: ['1']
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
       interval: 30s
       timeout: 10s
       retries: 3
