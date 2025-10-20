@@ -52,12 +52,16 @@ services:
       - reranker
   reranker:
     image: michaelf34/infinity:latest
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
+    # Fix for SELinux/AppArmor "cannot enable executable stack" error
+    # Uses torch backend to avoid ctranslate2 executable stack issues
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
     command: >-
       v2
       --model-id BAAI/bge-reranker-v2-m3
       --engine torch
+      --backend torch
       --dtype float16
       --batch-size 64
       --device cuda
