@@ -1,4 +1,3 @@
-version: '3.9'
 services:
   ingestion:
     build: ./services/ingestion
