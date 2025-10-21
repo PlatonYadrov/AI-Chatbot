@@ -16,6 +16,7 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
 from langchain_core.documents import Document
+from qdrant_client import QdrantClient
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +72,12 @@ class HybridRetriever:
         # Используем CustomQdrant если доступен (правильно обрабатывает поле 'text')
         QdrantClass = CustomQdrant if USE_CUSTOM_QDRANT else Qdrant
         
-        self.qdrant_vectorstore = QdrantClass.from_existing_collection(
-            embedding=embeddings,
+        # Строим явный QdrantClient и передаем его в vectorstore
+        client = QdrantClient(url=QDRANT_URL, prefer_grpc=False)
+        self.qdrant_vectorstore = QdrantClass(
+            client=client,
             collection_name=QDRANT_COLLECTION,
-            url=QDRANT_URL,
-            prefer_grpc=False,
-            path=None
+            embedding=embeddings,
         )
         self.dense_retriever = self.qdrant_vectorstore.as_retriever(
             search_kwargs={"k": k}
