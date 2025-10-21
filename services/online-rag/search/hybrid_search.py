@@ -19,6 +19,14 @@ from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
+# Импортируем CustomQdrant из gateway для правильной обработки поля 'text'
+try:
+    from api.gateway import CustomQdrant
+    USE_CUSTOM_QDRANT = True
+except ImportError:
+    USE_CUSTOM_QDRANT = False
+    logger.warning("CustomQdrant не найден, используем стандартный Qdrant")
+
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_chunks")
 
@@ -59,13 +67,16 @@ class HybridRetriever:
         
         # 1. Dense ретривер (Qdrant)
         logger.info(f"   Dense: Qdrant @ {QDRANT_URL}")
-        self.qdrant_vectorstore = Qdrant.from_existing_collection(
+        
+        # Используем CustomQdrant если доступен (правильно обрабатывает поле 'text')
+        QdrantClass = CustomQdrant if USE_CUSTOM_QDRANT else Qdrant
+        
+        self.qdrant_vectorstore = QdrantClass.from_existing_collection(
             embedding=embeddings,
             collection_name=QDRANT_COLLECTION,
             url=QDRANT_URL,
             prefer_grpc=False,
-            path=None,
-            content_payload_key="text"  # ← Явно указываем поле с текстом
+            path=None
         )
         self.dense_retriever = self.qdrant_vectorstore.as_retriever(
             search_kwargs={"k": k}
