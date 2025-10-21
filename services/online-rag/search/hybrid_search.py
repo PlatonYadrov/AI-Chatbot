@@ -77,8 +77,14 @@ class HybridRetriever:
         self.qdrant_vectorstore = QdrantClass(
             client=client,
             collection_name=QDRANT_COLLECTION,
-            embedding=embeddings,
+            embeddings=embeddings,
         )
+
+        # Явно укажем ключ payload для текста, чтобы брать текст из поля 'text'
+        try:
+            setattr(self.qdrant_vectorstore, "content_payload_key", "text")
+        except Exception:
+            pass
         self.dense_retriever = self.qdrant_vectorstore.as_retriever(
             search_kwargs={"k": k}
         )
