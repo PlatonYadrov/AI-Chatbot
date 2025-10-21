@@ -63,7 +63,8 @@ class HybridRetriever:
             embedding=embeddings,
             collection_name=QDRANT_COLLECTION,
             url=QDRANT_URL,
-            prefer_grpc=False
+            prefer_grpc=False,
+            path=None
         )
         self.dense_retriever = self.qdrant_vectorstore.as_retriever(
             search_kwargs={"k": k}
