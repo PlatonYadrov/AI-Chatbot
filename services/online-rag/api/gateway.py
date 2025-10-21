@@ -35,6 +35,15 @@ except ImportError as e:
 from chat.session_manager import SessionManager, ChatSession
 from chat.clarification_service import ClarificationService
 
+# Импорт гибридного поиска
+try:
+    from search.hybrid_search import get_global_hybrid_retriever, reset_global_retriever
+    HYBRID_SEARCH_AVAILABLE = True
+    logger.info("✅ Гибридный поиск импортирован успешно")
+except ImportError as e:
+    logger.warning(f"⚠️  Гибридный поиск недоступен: {e}")
+    HYBRID_SEARCH_AVAILABLE = False
+
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_chunks")
@@ -223,25 +232,64 @@ clarification_service = ClarificationService()
 
 @app.post("/query")
 def query_endpoint(req: QueryRequest):
+    """
+    Основной RAG endpoint с гибридным поиском.
+    
+    Args:
+        req: QueryRequest с параметрами запроса
+    
+    Returns:
+        Ответ с генерированным текстом и источниками
+    """
     embeddings = TEIEmbeddings()
-    vs = CustomQdrant.from_existing_collection(
-        embedding=embeddings,
-        collection_name=QDRANT_COLLECTION,
-        url=QDRANT_URL,
-        prefer_grpc=False,
-        path=None,
-    )
     
-    # Initial retrieval - get more candidates if reranking is enabled
+    # Определяем количество кандидатов для начального поиска
     initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
-    docs = vs.similarity_search(req.query, k=initial_k)
     
-    # Дополнительная фильтрация (кастомный класс уже обрабатывает пустые документы)
+    # ✅ ГИБРИДНЫЙ ПОИСК (если доступен)
+    if HYBRID_SEARCH_AVAILABLE:
+        try:
+            logger.info("🔍 Используем гибридный поиск (Dense + BM25 + RRF)")
+            
+            # Получаем глобальный кэшированный ретривер
+            hybrid_retriever = get_global_hybrid_retriever(embeddings)
+            
+            # Обновляем k для текущего запроса
+            hybrid_retriever.update_k(initial_k)
+            
+            # Выполняем гибридный поиск
+            docs = hybrid_retriever.get_relevant_documents(req.query)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка гибридного поиска, fallback на обычный: {e}")
+            # Fallback на обычный векторный поиск
+            vs = CustomQdrant.from_existing_collection(
+                embedding=embeddings,
+                collection_name=QDRANT_COLLECTION,
+                url=QDRANT_URL,
+                prefer_grpc=False,
+                path=None,
+            )
+            docs = vs.similarity_search(req.query, k=initial_k)
+    
+    # ❌ Обычный векторный поиск (если гибридный недоступен)
+    else:
+        logger.info("🔍 Используем обычный векторный поиск (Dense only)")
+        vs = CustomQdrant.from_existing_collection(
+            embedding=embeddings,
+            collection_name=QDRANT_COLLECTION,
+            url=QDRANT_URL,
+            prefer_grpc=False,
+            path=None,
+        )
+        docs = vs.similarity_search(req.query, k=initial_k)
+    
+    # Фильтрация пустых документов (кастомный класс уже обрабатывает, но перестраховка)
     docs = [doc for doc in docs if doc and doc.page_content and doc.page_content.strip()]
     
-    # Check if we have any valid documents
+    # Проверка что нашли хоть что-то
     if not docs:
-        logging.warning("No valid documents found in search results")
+        logging.warning("Не найдено валидных документов в результатах поиска")
         return {
             "answer": "Извините, не удалось найти релевантную информацию для вашего запроса.",
             "sources": [],
@@ -249,10 +297,10 @@ def query_endpoint(req: QueryRequest):
             "error": "No valid documents found"
         }
     
-    # Apply reranking if enabled and available
+    # Реранкинг (если включен и доступен)
     if req.use_reranking and RERANKING_AVAILABLE and docs:
         try:
-            # Convert docs to format expected by reranker
+            # Конвертируем docs в формат для реранкера
             candidates = []
             for d in docs:
                 meta = getattr(d, 'metadata', {}) or {}
@@ -261,41 +309,41 @@ def query_endpoint(req: QueryRequest):
                     meta = {**meta, 'text': d.page_content}
                 candidates.append(meta)
             
-            # Rerank candidates
+            # Реранжируем кандидатов
             rerank_k = req.rerank_top_k or req.k
-            logger.info(f"🔄 Calling reranker for {len(candidates)} candidates...")
+            logger.info(f"🔄 Вызов реранкера для {len(candidates)} кандидатов...")
             reranked_candidates = rerank_candidates(req.query, candidates, top_k=rerank_k)
             
-            # Update docs with reranked order
+            # Обновляем docs с отреранжированным порядком
             if reranked_candidates:
-                docs = docs[:len(reranked_candidates)]  # Keep original docs but limit to reranked count
-                # Log reranking details
+                docs = docs[:len(reranked_candidates)]  # Оставляем оригинальные docs но ограничиваем
+                # Логируем детали реранжирования
                 if reranked_candidates and isinstance(reranked_candidates[0], dict):
                     rerank_method = reranked_candidates[0].get('rerank_method', 'unknown')
                     rerank_model = reranked_candidates[0].get('rerank_model', 'unknown')
-                    logger.info(f"✅ Reranking completed: {len(candidates)} -> {len(reranked_candidates)} candidates")
-                    logger.info(f"   Method: {rerank_method}, Model: {rerank_model}")
+                    logger.info(f"✅ Реранкинг завершен: {len(candidates)} -> {len(reranked_candidates)} кандидатов")
+                    logger.info(f"   Метод: {rerank_method}, Модель: {rerank_model}")
             else:
-                logger.warning("⚠️  Reranking returned no candidates, using original docs")
+                logger.warning("⚠️  Реранкинг не вернул кандидатов, используем оригинальные docs")
                 docs = docs[:req.k]
             
         except Exception as e:
-            logging.error(f"Reranking failed, using original order: {e}")
-            # Fallback to original order
+            logging.error(f"Реранкинг не удался, используем оригинальный порядок: {e}")
+            # Fallback на оригинальный порядок
             docs = docs[:req.k]
     
-    # Limit to requested number if no reranking
+    # Ограничиваем до запрошенного количества если реранкинг выключен
     elif not req.use_reranking or not RERANKING_AVAILABLE:
         docs = docs[:req.k]
     
-    # Build context safely
+    # Строим контекст безопасно
     context_parts = []
     for d in docs:
         if hasattr(d, 'page_content') and d.page_content and d.page_content.strip():
             context_parts.append(d.page_content.strip())
     
     if not context_parts:
-        logging.warning("No valid context found for generation")
+        logging.warning("Не найдено валидного контекста для генерации")
         return {
             "answer": "Извините, не удалось найти релевантную информацию для вашего запроса.",
             "sources": [],
@@ -542,14 +590,28 @@ def chat_endpoint(req: ChatRequest):
             "reason": "No clarifications provided"
         }
     
-    # === Выполняем RAG поиск (аналогично /query endpoint) ===
-    # Примечание: embeddings и vs уже инициализированы в начале функции
+    # === Выполняем RAG поиск (с гибридным если доступен) ===
+    # Примечание: embeddings уже инициализирован в начале функции
     
     search_start = time.time()
     
     # Начальный поиск (больше кандидатов если используем реранкинг)
     initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
-    docs = vs.similarity_search(enhanced_query, k=initial_k)
+    
+    # ✅ ГИБРИДНЫЙ ПОИСК (если доступен)
+    if HYBRID_SEARCH_AVAILABLE:
+        try:
+            logger.info("🔍 Используем гибридный поиск для /chat")
+            hybrid_retriever = get_global_hybrid_retriever(embeddings)
+            hybrid_retriever.update_k(initial_k)
+            docs = hybrid_retriever.get_relevant_documents(enhanced_query)
+        except Exception as e:
+            logger.error(f"❌ Ошибка гибридного поиска в /chat, fallback: {e}")
+            docs = vs.similarity_search(enhanced_query, k=initial_k)
+    else:
+        # Обычный векторный поиск
+        docs = vs.similarity_search(enhanced_query, k=initial_k)
+    
     search_time = time.time() - search_start
     
     # Фильтруем валидные документы
@@ -830,6 +892,34 @@ def get_reranker_info_endpoint():
         }
 
 
+@app.post("/admin/reset-retriever")
+def reset_retriever():
+    """
+    Сбросить кэшированный гибридный ретривер.
+    
+    Зачем: Использовать после добавления новых документов в Qdrant,
+    чтобы BM25 индекс обновился с новыми документами.
+    
+    Returns:
+        Статус сброса
+    """
+    if not HYBRID_SEARCH_AVAILABLE:
+        raise HTTPException(
+            status_code=501,
+            detail="Гибридный поиск недоступен"
+        )
+    
+    try:
+        reset_global_retriever()
+        return {
+            "status": "success",
+            "message": "Гибридный ретривер сброшен, будет переиндексирован при следующем запросе"
+        }
+    except Exception as e:
+        logger.error(f"❌ Ошибка сброса ретривера: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 def health_check():
     """
@@ -839,6 +929,7 @@ def health_check():
         - Qdrant подключение
         - LLM доступность
         - Reranker статус
+        - Гибридный поиск статус
     
     Returns:
         Статус сервиса и зависимостей
@@ -878,5 +969,15 @@ def health_check():
             health_status["components"]["reranker"] = {"status": "error", "error": str(e)}
     else:
         health_status["components"]["reranker"] = {"status": "not_imported"}
+    
+    # Check Hybrid Search
+    if HYBRID_SEARCH_AVAILABLE:
+        health_status["components"]["hybrid_search"] = {
+            "status": "available",
+            "method": "LangChain EnsembleRetriever (Dense + BM25)",
+            "fusion": "RRF (Reciprocal Rank Fusion)"
+        }
+    else:
+        health_status["components"]["hybrid_search"] = {"status": "not_imported"}
     
     return health_status
