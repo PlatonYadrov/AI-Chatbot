@@ -64,7 +64,8 @@ class HybridRetriever:
             collection_name=QDRANT_COLLECTION,
             url=QDRANT_URL,
             prefer_grpc=False,
-            path=None
+            path=None,
+            content_payload_key="text"  # ← Явно указываем поле с текстом
         )
         self.dense_retriever = self.qdrant_vectorstore.as_retriever(
             search_kwargs={"k": k}
@@ -134,7 +135,8 @@ class HybridRetriever:
                     ""
                 )
                 
-                if text.strip():
+                # Проверяем что текст не пустой и не None
+                if text and isinstance(text, str) and text.strip():
                     # Убираем текстовые поля из метаданных (чтобы не дублировать)
                     metadata = {
                         k: v for k, v in payload.items()
@@ -142,13 +144,25 @@ class HybridRetriever:
                     }
                     
                     documents.append(
-                        Document(page_content=text, metadata=metadata)
+                        Document(page_content=text.strip(), metadata=metadata)
                     )
             
             if offset is None:
                 break
         
         logger.info(f"✅ Загружено {len(documents)} документов из Qdrant")
+        
+        # Проверяем что есть хотя бы несколько документов для BM25
+        if len(documents) < 1:
+            logger.warning("⚠️ Нет документов для BM25 индекса! Добавляем заглушку.")
+            # Добавляем заглушку чтобы BM25 не упал
+            documents.append(
+                Document(
+                    page_content="Placeholder document for BM25 initialization",
+                    metadata={"is_placeholder": True}
+                )
+            )
+        
         return documents
     
     def get_relevant_documents(self, query: str) -> List[Document]:
@@ -163,8 +177,19 @@ class HybridRetriever:
         """
         logger.info(f"🔍 Гибридный поиск: '{query[:50]}...'")
         results = self.ensemble.get_relevant_documents(query)
-        logger.info(f"✅ Найдено {len(results)} документов")
-        return results
+        
+        # Фильтруем документы с пустым page_content
+        valid_results = []
+        for doc in results:
+            if (doc and 
+                hasattr(doc, 'page_content') and 
+                doc.page_content and 
+                isinstance(doc.page_content, str) and 
+                doc.page_content.strip()):
+                valid_results.append(doc)
+        
+        logger.info(f"✅ Найдено {len(valid_results)} валидных документов (из {len(results)})")
+        return valid_results
     
     async def aget_relevant_documents(self, query: str) -> List[Document]:
         """Асинхронная версия get_relevant_documents."""
