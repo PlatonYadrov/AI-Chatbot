@@ -20,11 +20,11 @@ from qdrant_client import QdrantClient
 
 logger = logging.getLogger(__name__)
 
-# Импортируем CustomQdrant из gateway для правильной обработки поля 'text'
+# Импортируем CustomQdrant из локального модуля, чтобы не создавать циклы зависимостей
 try:
-    from api.gateway import CustomQdrant
+    from .custom_qdrant import CustomQdrant
     USE_CUSTOM_QDRANT = True
-except ImportError:
+except Exception:
     USE_CUSTOM_QDRANT = False
     logger.warning("CustomQdrant не найден, используем стандартный Qdrant")
 
