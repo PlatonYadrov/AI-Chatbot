@@ -15,7 +15,7 @@ from typing import Iterator, Optional, Dict, Any, TextIO
 import time
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractOcrOptions
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
 from docling.datamodel.base_models import InputFormat
 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
@@ -111,7 +111,7 @@ class DoclingParser(BaseParser):
         try:
             pipeline_options = PdfPipelineOptions()
             if self.ocr_enabled:
-                pipeline_options.ocr_options = TesseractOcrOptions(
+                pipeline_options.ocr_options = TesseractCliOcrOptions(
                     force_full_page_ocr=False,
                     lang=["rus", "eng"]
                 )
