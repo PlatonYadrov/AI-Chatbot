@@ -302,7 +302,7 @@ def query_endpoint(req: QueryRequest):
     return {"answer": answer, "thoughts": thoughts, "sources": sources}
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 def chat_endpoint(req: ChatRequest):
     """
     Диалоговый RAG endpoint с поддержкой уточняющих вопросов.
@@ -607,13 +607,17 @@ def chat_endpoint(req: ChatRequest):
     
     if not context_parts:
         session.add_message("assistant", "Контекст не найден")
-        return ChatResponse(
-            session_id=session.session_id,
-            state="completed",
-            answer="Извините, не удалось найти релевантную информацию.",
-            sources=[],
-            conversation_history=[m for m in session.messages]
-        )
+        # return ChatResponse(
+        #     session_id=session.session_id,
+        #     state="completed",
+        #     answer="Извините, не удалось найти релевантную информацию.",
+        #     sources=[],
+        #     conversation_history=[m for m in session.messages]
+        # )
+        return {
+            "answer": "Извините, не удалось найти релевантную информацию.",
+            "sourses": []
+        }
     
     context = "\n\n".join(context_parts)
     
@@ -655,36 +659,47 @@ def chat_endpoint(req: ChatRequest):
         "prompt_includes_clarifications": len(clarifications_text) > 0
     }
     
-    # Собираем источники
-    sources = []
+    # Собираем источники в требуемом формате
+    sourses = []
     for d in docs:
         meta = getattr(d, 'metadata', {}) or {}
         text_content = getattr(d, 'page_content', '')
-        meta = {**meta, 'text': text_content}
-        sources.append(meta)
-    
-    # 🆕 Финальная статистика
-    metadata["rag_pipeline"]["final_stats"] = {
-        "sources_used": len(sources),
-        "context_chunks": len(context_parts),
-        "total_context_length": len(context)
+        document_name = (
+            meta.get('source_uri')
+            or meta.get('source')
+            or meta.get('doc_id')
+            or meta.get('path')
+            or 'unknown'
+        )
+        sourses.append({
+            'text': text_content,
+            'document': document_name
+        })
+
+    # Старый подробный ответ временно отключен
+    # metadata["rag_pipeline"]["final_stats"] = {
+    #     "sources_used": len(sources),
+    #     "context_chunks": len(context_parts),
+    #     "total_context_length": len(context)
+    # }
+    # metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+    # metadata["timing"]["breakdown"] = {
+    #     "search": metadata["rag_pipeline"]["vector_search"]["search_time_ms"],
+    #     "reranking": metadata["rag_pipeline"]["reranking"].get("rerank_time_ms", 0),
+    #     "generation": metadata["rag_pipeline"]["generation"]["generation_time_ms"]
+    # }
+    # return ChatResponse(
+    #     session_id=session.session_id,
+    #     state="completed",
+    #     answer=answer,
+    #     sources=sources,
+    #     conversation_history=[m for m in session.messages],
+    #     metadata=metadata
+    # )
+    return {
+        "answer": answer,
+        "sourses": sourses
     }
-    
-    metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
-    metadata["timing"]["breakdown"] = {
-        "search": metadata["rag_pipeline"]["vector_search"]["search_time_ms"],
-        "reranking": metadata["rag_pipeline"]["reranking"].get("rerank_time_ms", 0),
-        "generation": metadata["rag_pipeline"]["generation"]["generation_time_ms"]
-    }
-    
-    return ChatResponse(
-        session_id=session.session_id,
-        state="completed",
-        answer=answer,
-        sources=sources,
-        conversation_history=[m for m in session.messages],
-        metadata=metadata
-    )
 
 
 @app.delete("/chat/{session_id}")
