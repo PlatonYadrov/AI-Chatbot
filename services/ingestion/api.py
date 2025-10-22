@@ -11,26 +11,20 @@ from typing import List, Dict, Any
 import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
-from langchain_community.vectorstores import Qdrant
-from langchain.embeddings.base import Embeddings
+
 from qdrant_client import QdrantClient
+from qdrant_client.http import exceptions as qexc
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 
-from processors.chunker import chunk_docling_token_packer
-from processors.docling_chunker import DoclingChunker, DoclingChunk
-from processors.deduplicator import deduplicate_chunks
+from processors.chunker import DocumentChunk, create_chunker, ChunkingConfig
 from parsers.docling_parser import DoclingParser
-from parsers.base import RawBlock
 
 
-OCR_URL = os.getenv("OCR_URL", "http://ocr:9000/ocr")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_chunks")
 
 # Docling Chunking Configuration
-USE_DOCLING_CHUNKING = os.getenv("USE_DOCLING_CHUNKING", "false").lower() == "true"
 MAX_TOKENS = int(os.getenv("CHUNKING_MAX_TOKENS", "512"))
-CHUNK_OVERLAP = int(os.getenv("CHUNKING_OVERLAP", "75"))
 
 
 LOGGER = logging.getLogger("ingestion.api")
@@ -38,7 +32,7 @@ if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
 
-class TEIEmbeddings(Embeddings):
+class TEIEmbeddings:
     def __init__(self, base_url: str = os.getenv("EMBEDDINGS_BASE_URL", "http://embeddings:80")):
         self.base_url = base_url.rstrip("/")
 
@@ -53,84 +47,36 @@ class TEIEmbeddings(Embeddings):
         try:
             resp = requests.post(f"{self.base_url}/embed", json={"inputs": texts}, timeout=180)
             resp.raise_for_status()
-            payload = resp.json()
-            # TEI may return one of:
-            # 1) [{...vector...}, {...}] or [[...], [...]]
-            # 2) {"data": [{"embedding": [...]}, ...]}
-            # 3) {"embeddings": [[...], [...]]}
-            if isinstance(payload, list):
-                embeddings = [p.get("embedding", []) if isinstance(p, dict) else p for p in payload]
-            elif isinstance(payload, dict):
-                if "data" in payload:
-                    embeddings = [item.get("embedding", []) for item in payload.get("data", [])]
-                elif "embeddings" in payload:
-                    embeddings = payload.get("embeddings", [])
-                elif "embedding" in payload:
-                    embeddings = [payload.get("embedding", [])]
-                else:
-                    embeddings = []
-            else:
-                embeddings = []
-            LOGGER.info(
-                "embeddings_ok endpoint=%s count=%s elapsed_ms=%s",
-                f"{self.base_url}/embed",
-                len(texts),
-                int((time.time() - start_ts) * 1000),
-            )
+            embeddings = resp.json()  # ожидаем в формате HF [[...], [...]]
+            LOGGER.info("embeddings_ok endpoint=%s count=%s elapsed_ms=%s", f"{self.base_url}/embed", len(texts), int((time.time() - start_ts) * 1000))
             return embeddings
         except Exception:
-            LOGGER.exception(
-                "embeddings_failed",
-                extra={"endpoint": f"{self.base_url}/embed", "count": len(texts)},
-            )
+            LOGGER.exception("embeddings_failed", extra={"endpoint": f"{self.base_url}/embed", "count": len(texts)})
             raise
 
 
 embeddings = TEIEmbeddings()
-client = QdrantClient(url=QDRANT_URL)
+qdrant_client = QdrantClient(url=QDRANT_URL)
 
-# Initialize Docling Chunker (lazy, only if enabled)
-docling_chunker = None
-if USE_DOCLING_CHUNKING:
-    # Auto-detect tokenizer from embeddings model or use explicit config
-    # ВАЖНО: теперь передаём HuggingFace model ID напрямую, не превращая в "bert-base-uncased"
-    tokenizer = os.getenv("CHUNKING_TOKENIZER")
-    if not tokenizer:
-        # Используем тот же токенизатор, что и для эмбеддингов (для согласованности)
-        tokenizer = os.getenv("EMBEDDINGS_MODEL", "intfloat/multilingual-e5-large")
-    
-    docling_chunker = DoclingChunker(
-        tokenizer=tokenizer,
-        max_tokens=MAX_TOKENS,
-        overlap=CHUNK_OVERLAP,
-        merge_peers=True,
-        include_metadata=True,
-    )
-    LOGGER.info(
-        "docling_chunking_enabled",
-        extra={
-            "max_tokens": MAX_TOKENS,
-            "overlap": CHUNK_OVERLAP,
-            "tokenizer": tokenizer,
-            "embeddings_model": os.getenv("EMBEDDINGS_MODEL", "unknown"),
-        },
-    )
+
 
 def _ensure_collection():
     try:
-        client.get_collection(QDRANT_COLLECTION)
+        qdrant_client.get_collection(QDRANT_COLLECTION)
+        LOGGER.debug(f"Collection '{QDRANT_COLLECTION}' already exists")
         return
-    except Exception as exc:
-        LOGGER.info("qdrant_collection_missing", extra={"collection": QDRANT_COLLECTION})
+    except qexc.ResponseHandlingException:
+        LOGGER.info(f"Collection '{QDRANT_COLLECTION}' not found, creating...")
+
     try:
-        size = len(embeddings.embed_query("dim"))
-        client.recreate_collection(
+        size = len(embeddings.embed_query(""))
+        qdrant_client.recreate_collection(
             collection_name=QDRANT_COLLECTION,
             vectors_config=VectorParams(size=size, distance=Distance.COSINE),
         )
-        LOGGER.info("qdrant_collection_ready", extra={"collection": QDRANT_COLLECTION, "size": size})
+        LOGGER.info(f"Collection '{QDRANT_COLLECTION}' created with vector size {size}")
     except Exception:
-        LOGGER.exception("qdrant_collection_failed", extra={"collection": QDRANT_COLLECTION})
+        LOGGER.exception("Failed to create Qdrant collection", extra={"collection": QDRANT_COLLECTION})
         raise
 
 app = FastAPI(title="Ingestion Service")
@@ -144,15 +90,8 @@ async def log_requests(request: Request, call_next):
         return response
     finally:
         elapsed_ms = int((time.time() - start_ts) * 1000)
-        LOGGER.info(
-            "http_request",
-            extra={
-                "method": request.method,
-                "path": request.url.path,
-                "elapsed_ms": elapsed_ms,
-                "client": getattr(request.client, "host", None),
-            },
-        )
+        if request.url.path not in ("/health", "/metrics"):
+            LOGGER.info("http_request", extra={"method": request.method, "path": request.url.path, "status": getattr(response, "status_code", None), "elapsed_ms": elapsed_ms, "client": getattr(request.client, "host", None),})
 
 
 @app.post("/ingest")
@@ -162,13 +101,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         filename = (file.filename or "document").strip()
         suffix = (filename.split(".")[-1] if "." in filename else "").lower()
         content_type = file.content_type or ""
-        LOGGER.info(
-            "upload_received filename=%s suffix=%s content_type=%s size=%s",
-            filename,
-            suffix,
-            content_type,
-            len(content),
-        )
+        LOGGER.info("upload_received filename=%s suffix=%s content_type=%s size=%s", filename, suffix,  content_type,len(content))
 
         # 1) Persist upload to a temporary path for parsers that require a file path
         tmp_dir = Path(os.getenv("DATA_DIR", "/data")) / "tmp"
@@ -177,8 +110,9 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         tmp_path.write_bytes(content)
 
         # 2) Parse document using Docling (unified parser for all formats)
-        parser_blocks: list[RawBlock] = []
         doc_id = hashlib.sha256(content).hexdigest()[:16]
+        docling_doc = None
+        md_text = None
         
         # Docling supports: PDF, DOCX, PPTX, XLSX, images (PNG, JPG, TIFF), HTML, and more
         supported_formats = {
@@ -199,30 +133,32 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                     preserve_structure=True,
                     offline_mode=os.getenv("DOCLING_OFFLINE_MODE", "true").lower() == "true",
                     cache_dir=os.getenv("DOCLING_CACHE_DIR"),
-                    use_vlm=os.getenv("DOCLING_USE_VLM", "false").lower() == "true",  # VLM off by default
+                    use_vlm=os.getenv("DOCLING_USE_VLM", "false").lower() == "true",
                 )
-                print(f"ocr_enabled: {os.getenv('DOCLING_OCR_ENABLED', 'true').lower() == 'true'}")
-                doc, md_text = parser.parse_to_document(str(tmp_path), doc_id=doc_id, markdown=True)
-                # parser_blocks = list(parser.parse(str(tmp_path), doc_id=doc_id))
+                LOGGER.debug("ocr_enabled=%s", os.getenv("DOCLING_OCR_ENABLED", "true").lower() == "true")
+                md_text, docling_doc = parser.parse_to_document(str(tmp_path), doc_id=doc_id, markdown=True)
             else:
                 # Fallback for unsupported formats: treat as plain text
                 LOGGER.info("fallback_text_parser", extra={"suffix": suffix, "path": str(tmp_path)})
-                raw_text = content.decode("utf-8", errors="ignore")
-                if raw_text.strip():
-                    parser_blocks = [
-                        RawBlock(text=raw_text, meta={"doc_id": doc_id, "type": "raw", "path": str(tmp_path)})
-                    ]
+                md_text = content.decode("utf-8", errors="ignore")
         except HTTPException:
             raise
         except Exception:
             LOGGER.exception("parse_failed", extra={"path": str(tmp_path), "suffix": suffix})
             raise HTTPException(status_code=500, detail="Parsing failed")
 
-        if not md_text:
-            LOGGER.warning("no_blocks filename=%s suffix=%s", filename, suffix)
+        if not md_text or not md_text.strip():
+            LOGGER.warning("no_content filename=%s suffix=%s", filename, suffix)
             raise HTTPException(status_code=400, detail="Parser produced no content")
 
-        # 3) Chunk with Docling HybridChunker (structure-aware) or traditional chunking
+        LOGGER.info(
+            f"📄 Document parsed successfully: "
+            f"size={len(md_text)} chars, "
+            f"has_docling_doc={docling_doc is not None}, "
+            f"ready_for_chunking=True"
+        )
+
+        # 3) Chunk with Docling HybridChunker (structure-aware) or fallback chunking
         doc_metadata = {
             "doc_id": doc_id,
             "source_uri": filename,
@@ -230,97 +166,157 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
         }
         chunk_dicts: list[dict[str, Any]] = []
         
-        # Strategy 1: Docling HybridChunker (structure-aware, recommended)
-        use_hybrid_chunking = USE_DOCLING_CHUNKING and docling_chunker and suffix in supported_formats
-        print(f"USE_DOCLING_CHUNKING: {USE_DOCLING_CHUNKING}")
-        ########################
-        if False:
+        LOGGER.info(f"🔧 Chunking strategy: {'HybridChunker (structure-aware)' if docling_doc else 'SimpleChunker (fallback)'}")
+        
+        if docling_doc is not None:
+            # Use Docling HybridChunker for structure-aware chunking
             try:
-                # Get DoclingDocument for structure-aware chunking
-                doc, md_text = parser.parse_to_document(str(tmp_path), doc_id=doc_id, markdown=True)
+                LOGGER.info("using_docling_hybrid_chunker", extra={"doc_id": doc_id})
                 
-                # Use HybridChunker to create structure-aware chunks
-                docling_chunks = docling_chunker.chunk_document(
-                    md_text,
-                    doc_metadata=doc_metadata,
+                # Create chunking configuration
+                config = ChunkingConfig(
+                    max_tokens=MAX_TOKENS,
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                    use_semantic_splitting=True,
                 )
                 
-                for chunk in docling_chunks:
-                    chunk_dicts.append(chunk.to_dict())
-                    print(chunk.to_dict())
+                # Initialize chunker
+                chunker = create_chunker(config=config)
+                
+                # Chunk document (async method)
+                docling_chunks: List[DocumentChunk] = await chunker.chunk_document(
+                    content=md_text,
+                    title=filename,
+                    source=str(tmp_path),
+                    metadata=doc_metadata,
+                    docling_doc=docling_doc,
+                )
+                
+                for i, chunk in enumerate(docling_chunks):
+                    chunk_meta = {**chunk.metadata}
+                    chunk_meta.setdefault("chunk_id", f"{doc_id}_chunk_{i}")
+                    chunk_dict = {
+                        "text": chunk.content,
+                        "meta": chunk_meta,
+                    }
+                    chunk_dicts.append(chunk_dict)
+                    
+                    # Детальное логирование каждого чанка
+                    preview_text = chunk.content[:100].replace('\n', ' ')
+                    LOGGER.info(
+                        f"[Chunk {i+1}/{len(docling_chunks)}] "
+                        f"size={len(chunk.content)} chars, "
+                        f"tokens={chunk_meta.get('token_count', 'N/A')}, "
+                        f"preview='{preview_text}...'"
+                    )
                 
                 LOGGER.info(
                     "docling_chunking_complete",
-                    extra={"doc_id": doc_id, "chunks": len(chunk_dicts), "strategy": "hybrid"},
+                    extra={"doc_id": doc_id, "chunks": len(chunk_dicts), "strategy": "docling_hybrid"},
                 )
             except Exception as e:
-                # Fallback to traditional chunking on error
-                LOGGER.warning(
-                    "docling_chunking_fallback",
-                    extra={"doc_id": doc_id, "error": str(e)},
-                )
-                use_hybrid_chunking = False  # Disable for this request
+                LOGGER.warning("docling_chunker_failed, falling back to simple chunking", extra={"error": str(e)})
+                docling_doc = None
         
-        # Strategy 2: Traditional chunking (fallback or default)
-        if not chunk_dicts:
-            chunk_dicts = chunk_docling_token_packer(doc, doc_id=doc_id, src_path=str(tmp_path))
-            # for i, block in enumerate(parser_blocks):
-            #     # Docling provides pre-cleaned text, no additional normalization needed
-            #     if not block.text or not block.text.strip():
-            #         continue
-
-            #     print(f"\n=== Block {i} Debug ===")
-            #     print(f"Block text length: {len(block.text)}")
-            #     print(f"Block meta: {block.meta}")
-            #     print(f"Block attributes: {[attr for attr in dir(block) if not attr.startswith('_')]}")
-            #     merged_meta: dict[str, Any] = {**doc_metadata, **(block.meta or {})}
-            #     for chunk in chunk_text(block.text, doc_metadata=merged_meta, lang="en"):
-            #         chunk_dicts.append(chunk.to_dict())
-            #         print("============================")
-            #         print(f"[Chunk {len(chunk_dicts)}] {chunk.text}")
-            
-            LOGGER.info(
-                "traditional_chunking_complete",
-                extra={"doc_id": doc_id, "chunks": len(chunk_dicts), "strategy": "traditional"},
-            )
+        # Fallback: use SimpleChunker if docling_doc is None or chunking failed
+        if not chunk_dicts and md_text:
+            try:
+                LOGGER.info("using_simple_chunker_fallback", extra={"doc_id": doc_id})
+                
+                # Create simple chunker configuration
+                config = ChunkingConfig(
+                    max_tokens=MAX_TOKENS,
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                    use_semantic_splitting=False,  # Use SimpleChunker
+                )
+                
+                # Initialize simple chunker
+                chunker = create_chunker(config=config)
+                
+                # Chunk document (async method)
+                simple_chunks: List[DocumentChunk] = await chunker.chunk_document(
+                    content=md_text,
+                    title=filename,
+                    source=str(tmp_path),
+                    metadata=doc_metadata,
+                )
+                
+                for i, chunk in enumerate(simple_chunks):
+                    chunk_meta = {**chunk.metadata}
+                    chunk_meta.setdefault("chunk_id", f"{doc_id}_chunk_{i}")
+                    chunk_dict = {
+                        "text": chunk.content,
+                        "meta": chunk_meta,
+                    }
+                    chunk_dicts.append(chunk_dict)
+                    
+                    # Детальное логирование каждого чанка
+                    preview_text = chunk.content[:100].replace('\n', ' ')
+                    LOGGER.info(
+                        f"[SimpleChunk {i+1}/{len(simple_chunks)}] "
+                        f"size={len(chunk.content)} chars, "
+                        f"tokens={chunk_meta.get('token_count', 'N/A')}, "
+                        f"preview='{preview_text}...'"
+                    )
+                
+                LOGGER.info(
+                    "simple_chunking_complete",
+                    extra={"doc_id": doc_id, "chunks": len(chunk_dicts), "strategy": "simple_fallback"},
+                )
+            except Exception as e:
+                LOGGER.exception("simple_chunker_also_failed", extra={"error": str(e)})
 
         if not chunk_dicts:
             LOGGER.warning("no_chunks doc_id=%s filename=%s", doc_id, filename)
             raise HTTPException(status_code=400, detail="No chunks produced")
 
-        # 4) Deduplicate
-        # unique_chunks = deduplicate_chunks(chunk_dicts, threshold=0.99)
-        unique_chunks = chunk_dicts
+        # Статистика по чанкам
+        total_chars = sum(len(c["text"]) for c in chunk_dicts)
+        avg_chars = total_chars // len(chunk_dicts) if chunk_dicts else 0
+        min_chars = min(len(c["text"]) for c in chunk_dicts) if chunk_dicts else 0
+        max_chars = max(len(c["text"]) for c in chunk_dicts) if chunk_dicts else 0
+        
         LOGGER.info(
-            "chunks_ready",
-            extra={
-                "doc_id": doc_id,
-                "chunks_total": len(chunk_dicts),
-                "chunks_unique": len(unique_chunks),
-            },
+            f"✓ Chunking statistics: "
+            f"total={len(chunk_dicts)} chunks, "
+            f"avg_size={avg_chars} chars, "
+            f"min={min_chars}, max={max_chars}, "
+            f"total_text={total_chars} chars"
         )
+        
+        LOGGER.info("chunks_ready", extra={"doc_id": doc_id, "chunks_total": len(chunk_dicts)})
 
-        # 5) Upsert into Qdrant with deterministic IDs (chunk_id)
+        # 4) Upsert into Qdrant with deterministic IDs (chunk_id)
         _ensure_collection()
         
         # TEI auto-truncate enabled - no manual truncation needed
         # Model will automatically truncate inputs to max context length
-        texts = [c["text"] for c in unique_chunks]
-        
-        metadatas = [c["meta"] for c in unique_chunks]
+        texts = [c["text"] for c in chunk_dicts]
+        metadatas = [c["meta"] for c in chunk_dicts]
 
         try:
             start_qdrant = time.time()
             
+            LOGGER.info(f"🔢 Creating embeddings for {len(texts)} chunks...")
+            
             # Batch embeddings to avoid exceeding TEI max_client_batch_size
             # TEI on CPU: reduce batch size for better timeout handling
             batch_size = 16  # Smaller batches on CPU (was 32)
+            total_batches = (len(texts) + batch_size - 1) // batch_size
             vectors = []
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
                 batch_vectors = embeddings.embed_documents(batch)
                 vectors.extend(batch_vectors)
-                LOGGER.debug(f"embedded_batch batch={i//batch_size + 1} size={len(batch)}")
+                batch_num = i//batch_size + 1
+                LOGGER.info(f"  Batch {batch_num}/{total_batches}: embedded {len(batch)} chunks")
+            
+            embedding_time = time.time() - start_qdrant
+            LOGGER.info(f"✓ Embeddings created in {embedding_time:.2f}s")
+            
+            LOGGER.info(f"💾 Preparing {len(vectors)} points for Qdrant...")
             
             points = []
             for text_value, vec, meta in zip(texts, vectors, metadatas):
@@ -336,13 +332,25 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
                 # persist chunk text for downstream inspection
                 payload.setdefault("text", text_value)
                 points.append(PointStruct(id=pid, vector=vec, payload=payload))
-            client.upsert(collection_name=QDRANT_COLLECTION, points=points, wait=True)
+            
+            LOGGER.info(f"⬆️  Upserting {len(points)} points to Qdrant collection '{QDRANT_COLLECTION}'...")
+            upsert_start = time.time()
+            qdrant_client.upsert(collection_name=QDRANT_COLLECTION, points=points, wait=True)
+            upsert_time = time.time() - upsert_start
+            total_time = time.time() - start_qdrant
+            
+            LOGGER.info(
+                f"✅ Successfully uploaded to Qdrant: "
+                f"{len(points)} vectors, "
+                f"upsert_time={upsert_time:.2f}s, "
+                f"total_time={total_time:.2f}s"
+            )
             LOGGER.info(
                 "qdrant_upsert_ok",
                 extra={
                     "collection": QDRANT_COLLECTION,
                     "count": len(points),
-                    "elapsed_ms": int((time.time() - start_qdrant) * 1000),
+                    "elapsed_ms": int(total_time * 1000),
                 },
             )
         except Exception:
@@ -356,8 +364,7 @@ async def ingest(file: UploadFile = File(...)) -> JSONResponse:
             {
                 "status": "ok",
                 "doc_id": doc_id,
-                "chunks_total": len(chunk_dicts),
-                "chunks_unique": len(unique_chunks),
+                "chunks_count": len(chunk_dicts),
             }
         )
     finally:
