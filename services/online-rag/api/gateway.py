@@ -92,6 +92,24 @@ def _format_plain(answer: str, sourses: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _format_qna(question: str, answer: str, sourses: List[Dict[str, str]] | None = None) -> str:
+    lines = [question, "", f"- {answer}"]
+    if sourses:
+        seen = set()
+        items = []
+        for item in sourses:
+            doc = item.get("document") or "unknown"
+            # По требованию: выводим только название документа без пути
+            src = doc
+            if src not in seen:
+                seen.add(src)
+                items.append(src)
+        if items:
+            lines.append("")
+            lines.append("источники: " + ", ".join(items))
+    return "\n".join(lines)
+
+
 class QueryRequest(BaseModel):
     """Модель запроса для обычного RAG (без диалога)."""
     query: str
@@ -622,7 +640,9 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
     if not context_parts:
         session.add_message("assistant", "Контекст не найден")
         if pretty:
-            return PlainTextResponse(_format_plain("Извините, не удалось найти релевантную информацию.", []))
+            # Старый формат оставлен в коде для отладки
+            # return PlainTextResponse(_format_plain("Извините, не удалось найти релевантную информацию.", []))
+            return PlainTextResponse(_format_qna(req.query, "Извините, не удалось найти релевантную информацию.", []))
         return {
             "answer": "Извините, не удалось найти релевантную информацию.",
             "sourses": []
@@ -673,14 +693,22 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
     for d in docs:
         meta = getattr(d, 'metadata', {}) or {}
         text_content = getattr(d, 'page_content', '')
-        document_name = (
-            meta.get('source_uri')
+        # Prefer a path-like field to extract basename
+        raw_path = (
+            meta.get('path')
+            or meta.get('source_path')
+            or meta.get('source_uri')
             or meta.get('source')
-            or meta.get('doc_id')
-            or meta.get('path')
-            or 'unknown'
+            or ''
         )
-        source_path = meta.get('path') or meta.get('source_path') or meta.get('source_uri') or ''
+        try:
+            document_name = os.path.basename(str(raw_path)) if raw_path else ''
+        except Exception:
+            document_name = ''
+        if not document_name:
+            # Fallback to doc_id or unknown
+            document_name = str(meta.get('doc_id') or 'unknown')
+        source_path = raw_path or ''
         sourses.append({
             'text': text_content,
             'document': document_name,
@@ -708,7 +736,9 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
     #     metadata=metadata
     # )
     if pretty:
-        return PlainTextResponse(_format_plain(answer, sourses))
+        # Старый формат оставлен в коде для отладки
+        # return PlainTextResponse(_format_plain(answer, sourses))
+        return PlainTextResponse(_format_qna(req.query, answer, sourses))
     return {"answer": answer, "sourses": sourses}
 
 
