@@ -80,11 +80,14 @@ class TEIEmbeddings(Embeddings):
 
 
 def _format_plain(answer: str, sourses: List[Dict[str, str]]) -> str:
-    lines = [f"answer: {answer}", "sourses:"]
+    lines = [f"answer: {answer}", "", "sourses:", ""]
     for i, item in enumerate(sourses, 1):
         doc = item.get("document", "unknown")
-        txt = (item.get("text") or "").replace("\n", " ").strip()
-        lines.append(f"{i}. {doc}: {txt}")
+        path = item.get("path") or item.get("source_path") or ""
+        path_part = f" ({path})" if path else ""
+        txt = (item.get("text") or "").rstrip()
+        lines.append(f"{i}) из документа {{{doc}{path_part}}} : {txt}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -313,7 +316,7 @@ def query_endpoint(req: QueryRequest):
 
 
 @app.post("/chat")
-def chat_endpoint(req: ChatRequest, pretty: bool = Query(False)):
+def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
     """
     Диалоговый RAG endpoint с поддержкой уточняющих вопросов.
     
@@ -676,9 +679,11 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(False)):
             or meta.get('path')
             or 'unknown'
         )
+        source_path = meta.get('path') or meta.get('source_path') or meta.get('source_uri') or ''
         sourses.append({
             'text': text_content,
-            'document': document_name
+            'document': document_name,
+            'path': source_path
         })
 
     # Старый подробный ответ временно отключен
