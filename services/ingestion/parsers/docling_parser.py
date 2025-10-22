@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Iterator, Optional, Dict, Any, TextIO
 import time
 
-from docling.document_converter import DocumentConverter
-from docling.datamodel.pipeline_options import TesseractCliOcrOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractOcrOptions
+from docling.datamodel.base_models import InputFormat
+from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
 from .base import BaseParser, RawBlock, ensure_dependency, ParserError
 
@@ -74,7 +76,6 @@ class DoclingParser(BaseParser):
         self.cache_dir = cache_dir or os.getenv("DOCLING_CACHE_DIR")
         if self.cache_dir:
             os.environ.setdefault("HF_HOME", self.cache_dir)
-            os.environ.setdefault("TRANSFORMERS_CACHE", self.cache_dir)
 
         # каталог для .md: создадим по требованию в parse()
         self.output_md_dir = Path(output_md_dir) if output_md_dir else None
@@ -108,7 +109,20 @@ class DoclingParser(BaseParser):
         resolved_id = self._resolve_doc_id(path_obj, doc_id)
         LOGGER.info("docling_parse_to_document_start", extra={"doc_id": resolved_id, "path": str(path_obj), "suffix": path_obj.suffix.lower(), "ocr": self.ocr_enabled, "tables": self.extract_tables, "images": self.extract_images, "vlm": self.use_vlm, "cache_dir": self.cache_dir, "return_markdown": markdown or markdown_only})
         try:
-            converter = DocumentConverter(pipeline_options=TesseractCliOcrOptions(force_full_page_ocr=False, lang=["rus", "eng"]))
+            pipeline_options = PdfPipelineOptions()
+            if self.ocr_enabled:
+                pipeline_options.ocr_options = TesseractOcrOptions(
+                    force_full_page_ocr=False,
+                    lang=["rus", "eng"]
+                )
+            
+            pdf_fmt_option = PdfFormatOption(
+                pipeline_options=pipeline_options,
+                backend=PyPdfiumDocumentBackend,
+            )
+            converter = DocumentConverter(
+                format_options={InputFormat.PDF: pdf_fmt_option}
+            )
             result = converter.convert(str(path_obj))
             md_text = result.document.export_to_markdown()
             return md_text, result.document
