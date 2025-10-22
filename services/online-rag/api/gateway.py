@@ -80,14 +80,15 @@ class TEIEmbeddings(Embeddings):
 
 
 def _format_plain(answer: str, sourses: List[Dict[str, str]]) -> str:
-    lines = [f"answer: {answer}", "", "sourses:", ""]
+    sep = "=" * 80
+    lines = [f"answer: {answer}", sep, "sourses:", sep]
     for i, item in enumerate(sourses, 1):
         doc = item.get("document", "unknown")
         path = item.get("path") or item.get("source_path") or ""
         path_part = f" ({path})" if path else ""
         txt = (item.get("text") or "").rstrip()
         lines.append(f"{i}) из документа {{{doc}{path_part}}} : {txt}")
-        lines.append("")
+        lines.append(sep)
     return "\n".join(lines)
 
 
