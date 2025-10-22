@@ -6,6 +6,7 @@ import logging
 from typing import List, Optional, Dict
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 # Initialize logger
@@ -76,6 +77,15 @@ class TEIEmbeddings(Embeddings):
             if "embedding" in payload:
                 return [payload.get("embedding", [])]
         return []
+
+
+def _format_plain(answer: str, sourses: List[Dict[str, str]]) -> str:
+    lines = [f"answer: {answer}", "sourses:"]
+    for i, item in enumerate(sourses, 1):
+        doc = item.get("document", "unknown")
+        txt = (item.get("text") or "").replace("\n", " ").strip()
+        lines.append(f"{i}. {doc}: {txt}")
+    return "\n".join(lines)
 
 
 class QueryRequest(BaseModel):
@@ -303,7 +313,7 @@ def query_endpoint(req: QueryRequest):
 
 
 @app.post("/chat")
-def chat_endpoint(req: ChatRequest):
+def chat_endpoint(req: ChatRequest, pretty: bool = Query(False)):
     """
     Диалоговый RAG endpoint с поддержкой уточняющих вопросов.
     
@@ -607,13 +617,8 @@ def chat_endpoint(req: ChatRequest):
     
     if not context_parts:
         session.add_message("assistant", "Контекст не найден")
-        # return ChatResponse(
-        #     session_id=session.session_id,
-        #     state="completed",
-        #     answer="Извините, не удалось найти релевантную информацию.",
-        #     sources=[],
-        #     conversation_history=[m for m in session.messages]
-        # )
+        if pretty:
+            return PlainTextResponse(_format_plain("Извините, не удалось найти релевантную информацию.", []))
         return {
             "answer": "Извините, не удалось найти релевантную информацию.",
             "sourses": []
@@ -659,7 +664,7 @@ def chat_endpoint(req: ChatRequest):
         "prompt_includes_clarifications": len(clarifications_text) > 0
     }
     
-    # Собираем источники в требуемом формате
+    # Собираем источники в требуемом формате (полный текст чанка)
     sourses = []
     for d in docs:
         meta = getattr(d, 'metadata', {}) or {}
@@ -696,10 +701,9 @@ def chat_endpoint(req: ChatRequest):
     #     conversation_history=[m for m in session.messages],
     #     metadata=metadata
     # )
-    return {
-        "answer": answer,
-        "sourses": sourses
-    }
+    if pretty:
+        return PlainTextResponse(_format_plain(answer, sourses))
+    return {"answer": answer, "sourses": sourses}
 
 
 @app.delete("/chat/{session_id}")
