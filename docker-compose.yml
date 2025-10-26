@@ -49,6 +49,7 @@ services:
       - llm
       - qdrant
       - reranker
+      - postgres
   reranker:
     # Custom reranker service using sentence-transformers (reliable, works everywhere)
     build:
@@ -85,6 +86,22 @@ services:
       - "0.0.0.0:6333:6333"
     volumes:
         - qdrant_storage:/qdrant/storage
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=rag_user
+      - POSTGRES_PASSWORD=rag_password
+      - POSTGRES_DB=rag_chatbot
+    ports:
+      - "0.0.0.0:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag_user -d rag_chatbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   llm:
     image: vllm/vllm-openai:v0.10.0
     environment:
@@ -142,4 +159,5 @@ volumes:
   hf_cache:
   rag_data:
   qdrant_storage:
+  postgres_data:
   docling_models:  # Persistent storage for Docling models (local, no external API)

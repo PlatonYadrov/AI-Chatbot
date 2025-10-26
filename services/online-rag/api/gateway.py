@@ -3,20 +3,23 @@ from __future__ import annotations
 import os
 import uuid
 import logging
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
 # Initialize logger
 logger = logging.getLogger(__name__)
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 import requests
 from generation.llm_service import generate_response
+
+# OpenAI client for conversational pipeline
+from openai import OpenAI
 
 # Import reranking service
 try:
@@ -33,7 +36,15 @@ except ImportError as e:
 
 # Import chat components for conversational RAG
 # Зачем: Добавляем диалоговый режим с уточняющими вопросами
-from chat.session_manager import SessionManager, ChatSession
+try:
+    from chat.db_session_manager import PostgresSessionManager
+    USE_POSTGRES_SESSIONS = True
+    logger.info("✅ Using PostgreSQL for session storage")
+except ImportError as e:
+    logger.warning(f"⚠️  PostgreSQL session manager not available, using in-memory: {e}")
+    from chat.session_manager import SessionManager
+    USE_POSTGRES_SESSIONS = False
+
 from chat.clarification_service import ClarificationService
 
 # Импорт гибридного поиска
@@ -77,19 +88,6 @@ class TEIEmbeddings(Embeddings):
             if "embedding" in payload:
                 return [payload.get("embedding", [])]
         return []
-
-
-def _format_plain(answer: str, sourses: List[Dict[str, str]]) -> str:
-    sep = "=" * 80
-    lines = [f"answer: {answer}", sep, "sourses:", sep]
-    for i, item in enumerate(sourses, 1):
-        doc = item.get("document", "unknown")
-        path = item.get("path") or item.get("source_path") or ""
-        path_part = f" ({path})" if path else ""
-        txt = (item.get("text") or "").rstrip()
-        lines.append(f"{i}) из документа {{{doc}{path_part}}} : {txt}")
-        lines.append(sep)
-    return "\n".join(lines)
 
 
 def _format_qna(question: str, answer: str, sourses: List[Dict[str, str]] | None = None) -> str:
@@ -153,12 +151,305 @@ class ChatResponse(BaseModel):
     metadata: Optional[Dict] = None  # Подробная информация о процессе
 
 
-app = FastAPI(title="RAG Gateway")
+# Глобальный менеджер сессий (инициализируется в lifespan)
+session_manager = None
+clarification_service = None
 
-# Инициализация сервисов для диалогового режима
-# Зачем: Создаем глобальные экземпляры для управления сессиями и уточнениями
-session_manager = SessionManager()
-clarification_service = ClarificationService()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler для инициализации и очистки ресурсов."""
+    global session_manager, clarification_service
+    
+    # Startup: инициализация сервисов
+    if USE_POSTGRES_SESSIONS:
+        session_manager = PostgresSessionManager()
+        try:
+            await session_manager.initialize()
+            logger.info("✅ Session manager initialized with PostgreSQL backend")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize PostgreSQL session manager: {e}")
+            logger.warning("⚠️  Falling back to in-memory session manager")
+            from chat.session_manager import SessionManager
+            session_manager = SessionManager()
+    else:
+        from chat.session_manager import SessionManager
+        session_manager = SessionManager()
+        logger.info("⚠️  Session manager initialized with in-memory backend")
+    
+    clarification_service = ClarificationService()
+    
+    logger.info("✅ RAG Gateway startup complete")
+    
+    yield
+    
+    # Shutdown: очистка ресурсов
+    logger.info("🔄 RAG Gateway shutting down...")
+
+
+app = FastAPI(title="RAG Gateway", lifespan=lifespan)
+
+# ==================== Conversational RAG Pipeline ====================
+# Зачем: Полноценный диалоговый пайплайн с query condensation и автоматическими уточнениями
+
+# Initialize OpenAI client for vLLM
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llm:8000/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-14B-Instruct-AWQ")
+llm_client = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
+
+
+def _call_llm_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: int = 800) -> str:
+    """
+    Вызов LLM через OpenAI-совместимый API.
+    
+    Args:
+        messages: Список сообщений в формате [{"role": "system|user|assistant", "content": "..."}]
+        temperature: Температура генерации
+        max_tokens: Максимальное количество токенов
+    
+    Returns:
+        Ответ LLM
+    """
+    try:
+        response = llm_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"LLM call failed: {e}")
+        raise HTTPException(status_code=500, detail=f"LLM error: {str(e)}")
+
+
+def _condense_question_with_history(question: str, history_messages: List[Dict]) -> str:
+    """
+    Переформулирует вопрос пользователя в самостоятельный с учетом истории диалога.
+    
+    Зачем: Делает запрос независимым от контекста предыдущих сообщений для лучшего поиска.
+    
+    Args:
+        question: Оригинальный вопрос пользователя
+        history_messages: История диалога из SessionManager
+    
+    Returns:
+        Переформулированный самостоятельный вопрос
+    """
+    if not history_messages or len(history_messages) <= 1:
+        return question
+    
+    # Формируем историю для промпта (последние 8 сообщений для контекста)
+    history_text = ""
+    for msg in history_messages[-8:-1]:  # Исключаем последнее (текущий вопрос)
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "user":
+            history_text += f"Пользователь: {content}\n"
+        elif role == "assistant":
+            history_text += f"Ассистент: {content}\n"
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "Переформулируй последний вопрос пользователя в самостоятельный, используя контекст истории диалога. Верни ТОЛЬКО переформулированный вопрос без дополнительного текста."
+        },
+        {
+            "role": "user",
+            "content": f"""История диалога:
+{history_text}
+
+Последний вопрос пользователя: {question}
+
+Переформулируй последний вопрос так, чтобы он был понятен без контекста истории. Ответь ТОЛЬКО переформулированным вопросом."""
+        }
+    ]
+    
+    condensed = _call_llm_chat(messages, temperature=0.1, max_tokens=200)
+    logger.info(f"🔄 Query condensation: '{question}' → '{condensed}'")
+    return condensed.strip()
+
+
+def _check_clarification_needed(question: str, history_messages: List[Dict]) -> Dict[str, Any]:
+    """
+    Определяет нужны ли уточнения для ответа на вопрос.
+    
+    Зачем: Предотвращает галлюцинации при неполных/расплывчатых вопросах.
+    
+    Args:
+        question: Вопрос пользователя
+        history_messages: История диалога
+    
+    Returns:
+        Dict с полями:
+        - need_clarification: bool - нужны ли уточнения
+        - clarification_question: str - вопрос для уточнения (если нужно)
+        - reason: str - причина необходимости уточнения
+    """
+    # Формируем краткую историю
+    history_text = ""
+    if history_messages and len(history_messages) > 1:
+        for msg in history_messages[-6:-1]:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "user":
+                history_text += f"User: {content}\n"
+            elif role == "assistant":
+                history_text += f"Assistant: {content}\n"
+    
+    history_section = f"\nИстория диалога:\n{history_text}" if history_text else ""
+    
+    messages = [
+        {
+            "role": "system",
+            "content": """Определи, достаточно ли информации в вопросе для выполнения поиска в базе знаний и предоставления точного ответа.
+
+Вопрос требует уточнения если:
+- Содержит неоднозначные местоимения (это, тот, та) без контекста
+- Слишком общий/широкий (например "расскажи о компании")
+- Отсутствуют критичные параметры (даты, имена, типы документов)
+- Неясно о чем конкретно спрашивается
+
+НЕ требует уточнения если:
+- Вопрос конкретный и понятный
+- Есть достаточный контекст в истории диалога
+- Можно выполнить осмысленный поиск
+
+Верни JSON со структурой:
+{
+  "need_clarification": true/false,
+  "clarification_question": "краткий вопрос для уточнения (если need_clarification=true)",
+  "reason": "краткая причина"
+}"""
+        },
+        {
+            "role": "user",
+            "content": f"""Вопрос пользователя: {question}{history_section}
+
+Верни ТОЛЬКО валидный JSON без дополнительного текста."""
+        }
+    ]
+    
+    response = _call_llm_chat(messages, temperature=0.1, max_tokens=300)
+    
+    # Парсим JSON
+    import json
+    try:
+        # Извлекаем JSON из ответа (на случай если LLM добавил текст)
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = response[json_start:json_end]
+            result = json.loads(json_str)
+            
+            need = bool(result.get("need_clarification", False))
+            clarification = result.get("clarification_question", "").strip()
+            reason = result.get("reason", "").strip()
+            
+            logger.info(f"🔍 Clarification check: need={need}, reason={reason}")
+            
+            return {
+                "need_clarification": need,
+                "clarification_question": clarification if need else "",
+                "reason": reason
+            }
+    except Exception as e:
+        logger.warning(f"Failed to parse clarification check response: {e}")
+    
+    # Fail-safe: не требуем уточнения при ошибке парсинга
+    return {
+        "need_clarification": False,
+        "clarification_question": "",
+        "reason": "Parse error, proceeding without clarification"
+    }
+
+
+def _format_docs_with_citations(docs: List[Document]) -> tuple[str, List[Dict]]:
+    """
+    Форматирует документы для контекста с нумерацией для цитирования.
+    
+    Args:
+        docs: Список документов LangChain
+    
+    Returns:
+        Tuple из:
+        - context: Строка с пронумерованным контекстом
+        - citations: Список метаданных источников с ID
+    """
+    context_parts = []
+    citations = []
+    
+    for i, doc in enumerate(docs, 1):
+        meta = getattr(doc, 'metadata', {}) or {}
+        content = getattr(doc, 'page_content', '').strip()
+        
+        if not content:
+            continue
+        
+        # Извлекаем имя документа
+        raw_path = (
+            meta.get('path')
+            or meta.get('source_path')
+            or meta.get('source_uri')
+            or meta.get('source')
+            or ''
+        )
+        try:
+            document_name = os.path.basename(str(raw_path)) if raw_path else ''
+        except Exception:
+            document_name = ''
+        
+        if not document_name:
+            document_name = str(meta.get('doc_id') or f'source_{i}')
+        
+        # Ограничиваем длину чанка для контекста (первые 600 символов)
+        snippet = content[:600] + "..." if len(content) > 600 else content
+        
+        # Добавляем в контекст с номером для цитирования
+        context_parts.append(f"[#{i}] Источник: {document_name}\n{snippet}")
+        
+        # Сохраняем метаданные для ответа
+        citations.append({
+            "id": i,
+            "document": document_name,
+            "path": raw_path,
+            "text": content,  # Полный текст чанка
+            "page": meta.get("page"),
+            "chunk_id": meta.get("chunk_id")
+        })
+    
+    context = "\n\n".join(context_parts)
+    return context, citations
+
+
+class ConversationalRequest(BaseModel):
+    """Запрос для конверсационного RAG пайплайна."""
+    query: str
+    session_id: Optional[str] = None
+    k: int = 5  # Количество документов для retrieval
+    use_reranking: bool = True
+    rerank_top_k: Optional[int] = None
+    skip_condensation: bool = False  # Пропустить переформулировку вопроса
+    skip_clarification_check: bool = False  # Пропустить проверку на уточнения
+
+
+class ConversationalResponse(BaseModel):
+    """Ответ конверсационного RAG пайплайна."""
+    session_id: str
+    state: str  # "awaiting_clarification" или "completed"
+    
+    # Если нужны уточнения
+    clarification_question: Optional[str] = None
+    clarification_reason: Optional[str] = None
+    
+    # Если ответ готов
+    answer: Optional[str] = None
+    citations: Optional[List[Dict]] = None  # Список источников с ID для цитирования
+    
+    # Метаданные
+    condensed_query: Optional[str] = None  # Переформулированный запрос
+    conversation_history: List[Dict] = []
+    metadata: Optional[Dict] = None  # Техническая информация о процессе
 
 
 @app.post("/query")
@@ -645,7 +936,10 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
             return PlainTextResponse(_format_qna(req.query, "Извините, не удалось найти релевантную информацию.", []))
         return {
             "answer": "Извините, не удалось найти релевантную информацию.",
-            "sourses": []
+            "sources": [],
+            "sourses": [],
+            "conversation_history": [m for m in session.messages],
+            "metadata": metadata
         }
     
     context = "\n\n".join(context_parts)
@@ -715,35 +1009,363 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
             'path': source_path
         })
 
-    # Старый подробный ответ временно отключен
-    # metadata["rag_pipeline"]["final_stats"] = {
-    #     "sources_used": len(sources),
-    #     "context_chunks": len(context_parts),
-    #     "total_context_length": len(context)
-    # }
-    # metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
-    # metadata["timing"]["breakdown"] = {
-    #     "search": metadata["rag_pipeline"]["vector_search"]["search_time_ms"],
-    #     "reranking": metadata["rag_pipeline"]["reranking"].get("rerank_time_ms", 0),
-    #     "generation": metadata["rag_pipeline"]["generation"]["generation_time_ms"]
-    # }
-    # return ChatResponse(
-    #     session_id=session.session_id,
-    #     state="completed",
-    #     answer=answer,
-    #     sources=sources,
-    #     conversation_history=[m for m in session.messages],
-    #     metadata=metadata
-    # )
+    # Сформируем детальные источники (metadata + text)
+    sources = []
+    for d in docs:
+        meta = getattr(d, 'metadata', {}) or {}
+        text_content = getattr(d, 'page_content', '')
+        sources.append({**meta, 'text': text_content})
+
+    metadata["rag_pipeline"]["final_stats"] = {
+        "sources_used": len(sources),
+        "context_chunks": len(context_parts),
+        "total_context_length": len(context)
+    }
+    metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+    metadata["timing"]["breakdown"] = {
+        "search": metadata["rag_pipeline"]["vector_search"]["search_time_ms"],
+        "reranking": metadata["rag_pipeline"]["reranking"].get("rerank_time_ms", 0),
+        "generation": metadata["rag_pipeline"]["generation"]["generation_time_ms"]
+    }
     if pretty:
         # Старый формат оставлен в коде для отладки
         # return PlainTextResponse(_format_plain(answer, sourses))
         return PlainTextResponse(_format_qna(req.query, answer, sourses))
-    return {"answer": answer, "sourses": sourses}
+    return ChatResponse(
+        session_id=session.session_id,
+        state="completed",
+        answer=answer,
+        sources=sources,
+        conversation_history=[m for m in session.messages],
+        metadata=metadata
+    )
+
+
+@app.post("/chat/conversational", response_model=ConversationalResponse)
+async def conversational_rag_endpoint(req: ConversationalRequest):
+    """
+    Полноценный конверсационный RAG-пайплайн с историей, query condensation и автоматическими уточнениями.
+    
+    Особенности:
+    - Query condensation: переформулировка вопроса с учетом истории диалога
+    - Автоматическое определение необходимости уточнений через LLM
+    - Гибридный поиск (если доступен) + реранкинг
+    - Ответ с пронумерованными цитатами источников [#1], [#2], ...
+    - Полная история диалога в рамках сессии
+    
+    Поток работы:
+    1. Получить/создать сессию
+    2. Проверка на необходимость уточнений (если не пропущено)
+    3. Переформулировка вопроса с учетом истории (query condensation)
+    4. RAG: гибридный поиск + реранкинг
+    5. Генерация ответа с цитатами
+    
+    Args:
+        req: ConversationalRequest с вопросом и параметрами
+    
+    Returns:
+        ConversationalResponse с ответом или вопросом для уточнения
+    """
+    import time
+    start_time = time.time()
+    
+    metadata = {
+        "pipeline": "conversational_rag",
+        "steps": {},
+        "timing": {}
+    }
+    
+    # Инициализируем embeddings
+    embeddings = TEIEmbeddings()
+    
+    # Получаем или создаем сессию
+    session = await session_manager.get_or_create_session(req.session_id)
+    await session.add_message("user", req.query)
+    
+    # Получаем историю для обработки
+    history_messages = await session.get_messages()
+    
+    # ===== ШАГ 1: Проверка на необходимость уточнений =====
+    if not req.skip_clarification_check and session.state == "initial":
+        clarification_start = time.time()
+        clarification_result = _check_clarification_needed(req.query, history_messages)
+        clarification_time = time.time() - clarification_start
+        
+        metadata["steps"]["clarification_check"] = {
+            "performed": True,
+            "need_clarification": clarification_result["need_clarification"],
+            "reason": clarification_result["reason"],
+            "time_ms": round(clarification_time * 1000, 2)
+        }
+        
+        if clarification_result["need_clarification"]:
+            clarification_q = clarification_result["clarification_question"]
+            await session.add_message("assistant", clarification_q)
+            await session.set_pending_questions([clarification_q])
+            session.state = "awaiting_clarification"
+            
+            metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+            
+            return ConversationalResponse(
+                session_id=session.session_id,
+                state="awaiting_clarification",
+                clarification_question=clarification_q,
+                clarification_reason=clarification_result["reason"],
+                conversation_history=await session.get_messages(),
+                metadata=metadata
+            )
+    else:
+        metadata["steps"]["clarification_check"] = {
+            "performed": False,
+            "reason": "Skipped by request" if req.skip_clarification_check else "Not first message"
+        }
+    
+    # Обновляем состояние сессии
+    if session.state != "active":
+        session.state = "active"
+    
+    # ===== ШАГ 2: Query Condensation (переформулировка с учетом истории) =====
+    query_for_search = req.query
+    
+    if not req.skip_condensation and len(history_messages) > 1:
+        condensation_start = time.time()
+        query_for_search = _condense_question_with_history(req.query, history_messages)
+        condensation_time = time.time() - condensation_start
+        
+        metadata["steps"]["query_condensation"] = {
+            "performed": True,
+            "original_query": req.query,
+            "condensed_query": query_for_search,
+            "time_ms": round(condensation_time * 1000, 2)
+        }
+    else:
+        metadata["steps"]["query_condensation"] = {
+            "performed": False,
+            "reason": "Skipped by request" if req.skip_condensation else "No history"
+        }
+    
+    # ===== ШАГ 3: RAG Retrieval (гибридный поиск если доступен) =====
+    search_start = time.time()
+    
+    # Определяем количество кандидатов для начального поиска
+    initial_k = req.k * 3 if (req.use_reranking and RERANKING_AVAILABLE) else req.k
+    
+    # Гибридный поиск (если доступен)
+    if HYBRID_SEARCH_AVAILABLE:
+        try:
+            logger.info("🔍 Using hybrid search for conversational RAG")
+            hybrid_retriever = get_global_hybrid_retriever(embeddings)
+            hybrid_retriever.update_k(initial_k)
+            docs = hybrid_retriever.get_relevant_documents(query_for_search)
+            search_method = "hybrid"
+        except Exception as e:
+            logger.error(f"❌ Hybrid search failed, fallback to vector search: {e}")
+            vs = CustomQdrant.from_existing_collection(
+                embedding=embeddings,
+                collection_name=QDRANT_COLLECTION,
+                url=QDRANT_URL,
+                prefer_grpc=False,
+                path=None,
+            )
+            docs = vs.similarity_search(query_for_search, k=initial_k)
+            search_method = "vector_fallback"
+    else:
+        # Обычный векторный поиск
+        vs = CustomQdrant.from_existing_collection(
+            embedding=embeddings,
+            collection_name=QDRANT_COLLECTION,
+            url=QDRANT_URL,
+            prefer_grpc=False,
+            path=None,
+        )
+        docs = vs.similarity_search(query_for_search, k=initial_k)
+        search_method = "vector"
+    
+    search_time = time.time() - search_start
+    
+    # Фильтруем валидные документы
+    docs_before_filter = len(docs)
+    docs = [doc for doc in docs if doc and doc.page_content and doc.page_content.strip()]
+    
+    metadata["steps"]["retrieval"] = {
+        "method": search_method,
+        "query_used": query_for_search,
+        "initial_k": initial_k,
+        "documents_found": docs_before_filter,
+        "documents_after_filter": len(docs),
+        "time_ms": round(search_time * 1000, 2)
+    }
+    
+    if not docs:
+        error_msg = "Извините, не удалось найти релевантную информацию для вашего запроса."
+        await session.add_message("assistant", error_msg)
+        metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+        
+        return ConversationalResponse(
+            session_id=session.session_id,
+            state="completed",
+            answer=error_msg,
+            citations=[],
+            condensed_query=query_for_search if not req.skip_condensation else None,
+            conversation_history=await session.get_messages(),
+            metadata=metadata
+        )
+    
+    # ===== ШАГ 4: Reranking (если включен) =====
+    if req.use_reranking and RERANKING_AVAILABLE and docs:
+        try:
+            rerank_start = time.time()
+            
+            # Конвертируем docs в формат для реранкера
+            candidates = []
+            for d in docs:
+                meta = getattr(d, 'metadata', {}) or {}
+                if hasattr(d, 'page_content') and d.page_content:
+                    meta = {**meta, 'text': d.page_content}
+                candidates.append(meta)
+            
+            rerank_k = req.rerank_top_k or req.k
+            logger.info(f"🔄 Reranking {len(candidates)} candidates...")
+            reranked_candidates = rerank_candidates(query_for_search, candidates, top_k=rerank_k)
+            
+            rerank_time = time.time() - rerank_start
+            docs_before_rerank = len(docs)
+            
+            if reranked_candidates:
+                docs = docs[:len(reranked_candidates)]
+                rerank_method = reranked_candidates[0].get('rerank_method', 'unknown')
+                rerank_model = reranked_candidates[0].get('rerank_model', 'unknown')
+                
+                metadata["steps"]["reranking"] = {
+                    "performed": True,
+                    "method": rerank_method,
+                    "model": rerank_model,
+                    "candidates_before": docs_before_rerank,
+                    "candidates_after": len(docs),
+                    "target_k": rerank_k,
+                    "time_ms": round(rerank_time * 1000, 2)
+                }
+            else:
+                docs = docs[:req.k]
+                metadata["steps"]["reranking"] = {
+                    "performed": True,
+                    "success": False,
+                    "fallback": "Using original order"
+                }
+        
+        except Exception as e:
+            logger.error(f"Reranking failed: {e}")
+            docs = docs[:req.k]
+            metadata["steps"]["reranking"] = {
+                "performed": True,
+                "error": str(e),
+                "fallback": "Using original order"
+            }
+    else:
+        docs = docs[:req.k]
+        metadata["steps"]["reranking"] = {
+            "performed": False,
+            "reason": "Disabled by user" if not req.use_reranking else "Not available"
+        }
+    
+    # ===== ШАГ 5: Форматирование контекста с цитатами =====
+    context, citations = _format_docs_with_citations(docs)
+    
+    if not context:
+        error_msg = "Извините, не удалось сформировать контекст для ответа."
+        await session.add_message("assistant", error_msg)
+        metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+        
+        return ConversationalResponse(
+            session_id=session.session_id,
+            state="completed",
+            answer=error_msg,
+            citations=[],
+            condensed_query=query_for_search if not req.skip_condensation else None,
+            conversation_history=await session.get_messages(),
+            metadata=metadata
+        )
+    
+    # ===== ШАГ 6: Генерация ответа с учетом истории =====
+    generation_start = time.time()
+    
+    # Формируем историю для промпта (последние 6 сообщений)
+    history_for_prompt = []
+    for msg in history_messages[-7:-1]:  # Исключаем текущий вопрос
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "user":
+            history_for_prompt.append({"role": "user", "content": content})
+        elif role == "assistant":
+            history_for_prompt.append({"role": "assistant", "content": content})
+    
+    # Системный промпт
+    system_message = {
+        "role": "system",
+        "content": """Ты — эксперт-ассистент для RAG-системы. Твоя задача — предоставить точный и развернутый ответ на основе контекста из базы знаний.
+
+Правила:
+1. Отвечай ТОЛЬКО на основе предоставленного контекста
+2. Если информации недостаточно — четко укажи это
+3. Используй цитаты источников в формате [#N] где N — номер источника
+4. Будь конкретным и структурированным
+5. Не выдумывай информацию, которой нет в контексте
+6. В конце ответа добавь краткий список использованных источников в формате:
+
+Источники: [#1] название_документа, [#2] название_документа..."""
+    }
+    
+    # Формируем финальные сообщения
+    messages = [system_message] + history_for_prompt + [
+        {
+            "role": "user",
+            "content": f"""Контекст из базы знаний (с номерами для цитирования):
+
+{context}
+
+Вопрос пользователя: {req.query}
+
+Предоставь развернутый ответ, используя контекст. Обязательно цитируй источники в формате [#N]."""
+        }
+    ]
+    
+    # Вызываем LLM
+    answer = _call_llm_chat(messages, temperature=0.2, max_tokens=1000)
+    generation_time = time.time() - generation_start
+    
+    await session.add_message("assistant", answer)
+    
+    metadata["steps"]["generation"] = {
+        "model": LLM_MODEL,
+        "max_tokens": 1000,
+        "temperature": 0.2,
+        "context_length": len(context),
+        "history_messages_used": len(history_for_prompt),
+        "time_ms": round(generation_time * 1000, 2)
+    }
+    
+    metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+    metadata["timing"]["breakdown"] = {
+        "clarification_check": metadata["steps"]["clarification_check"].get("time_ms", 0),
+        "query_condensation": metadata["steps"]["query_condensation"].get("time_ms", 0),
+        "retrieval": metadata["steps"]["retrieval"]["time_ms"],
+        "reranking": metadata["steps"]["reranking"].get("time_ms", 0),
+        "generation": metadata["steps"]["generation"]["time_ms"]
+    }
+    
+    return ConversationalResponse(
+        session_id=session.session_id,
+        state="completed",
+        answer=answer,
+        citations=citations,
+        condensed_query=query_for_search if not req.skip_condensation else None,
+        conversation_history=await session.get_messages(),
+        metadata=metadata
+    )
 
 
 @app.delete("/chat/{session_id}")
-def delete_chat_session(session_id: str):
+async def delete_chat_session(session_id: str):
     """
     Удалить сессию диалога.
     
@@ -755,12 +1377,12 @@ def delete_chat_session(session_id: str):
     Returns:
         Статус удаления
     """
-    session_manager.delete_session(session_id)
+    await session_manager.delete_session(session_id)
     return {"status": "deleted", "session_id": session_id}
 
 
 @app.get("/chat/{session_id}")
-def get_chat_session(session_id: str):
+async def get_chat_session(session_id: str):
     """
     Получить информацию о сессии диалога.
     
@@ -775,14 +1397,14 @@ def get_chat_session(session_id: str):
     Raises:
         HTTPException: Если сессия не найдена
     """
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session.to_dict()
 
 
 @app.get("/chat/stats")
-def get_chat_stats():
+async def get_chat_stats():
     """
     Получить статистику по всем сессиям.
     
@@ -791,11 +1413,11 @@ def get_chat_stats():
     Returns:
         Статистика сессий
     """
-    return session_manager.get_stats()
+    return await session_manager.get_stats()
 
 
 @app.post("/chat/cleanup")
-def cleanup_expired_sessions():
+async def cleanup_expired_sessions():
     """
     Очистить истекшие сессии.
     
@@ -805,8 +1427,8 @@ def cleanup_expired_sessions():
     Returns:
         Результат очистки
     """
-    session_manager.cleanup_expired()
-    stats = session_manager.get_stats()
+    await session_manager.cleanup_expired()
+    stats = await session_manager.get_stats()
     return {"status": "cleaned", "current_sessions": stats["total_sessions"]}
 
 
