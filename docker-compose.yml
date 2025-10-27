@@ -87,7 +87,9 @@ services:
     volumes:
         - qdrant_storage:/qdrant/storage
   postgres:
-    image: postgres:16-alpine
+    build:
+      context: ./infrastructure/postgres
+      dockerfile: Dockerfile
     environment:
       - POSTGRES_USER=rag_user
       - POSTGRES_PASSWORD=rag_password
