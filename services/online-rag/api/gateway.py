@@ -359,7 +359,7 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
         }
     ]
     
-    response = _call_llm_chat(messages, temperature=0.1, max_tokens=300)
+    response = _call_llm_chat(messages, temperature=0.1, max_tokens=1000)
     try:
         logger.info(f"🤖 LLM raw clarification response: {response}")
     except Exception:
