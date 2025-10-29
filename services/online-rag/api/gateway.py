@@ -304,7 +304,8 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
     kb_section = "\n## КОНТЕКСТ_БАЗЫ_ЗНАНИЙ\n—"
     if kb_context:
         # Ограничим размер для промпта, чтобы избежать переполнения контекста
-        kb_snippet = kb_context[:2000]
+        kb_snippet = kb_context
+        print(f"вот контекст: {kb_snippet[:100]}")
         kb_section = f"\n## КОНТЕКСТ_БАЗЫ_ЗНАНИЙ (фрагменты)\n{kb_snippet}"
     
     messages = [
