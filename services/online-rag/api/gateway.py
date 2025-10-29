@@ -198,7 +198,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-14B-Instruct-AWQ")
 llm_client = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
 
 
-def _call_llm_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: int = 800) -> str:
+def _call_llm_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: int = 8000) -> str:
     """
     Вызов LLM через OpenAI-совместимый API.
     
@@ -335,7 +335,7 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
 # ФОРМАТ ОТВЕТА (JSON)
 {
   "need_clarification": true/false,
-  "clarification_question": "краткий вопрос для уточнения (если need_clarification=true)",
+  "clarification_question": "краткий вопрос для уточнения, основанный на КОНТЕКСТЕ_БАЗЫ_ЗНАНИЙ (если need_clarification=true)",
   "reason": "краткая причина"
 }
 """
