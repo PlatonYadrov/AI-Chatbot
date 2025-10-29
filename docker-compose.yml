@@ -111,7 +111,6 @@ services:
       - CUDA_VISIBLE_DEVICES=0,1
     command: >-
       --model t-tech/T-pro-it-2.0-AWQ
-      --quantization awq
       --tensor-parallel-size 2
       --dtype half
       --max-model-len 32768
