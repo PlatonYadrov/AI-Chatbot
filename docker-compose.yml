@@ -114,12 +114,11 @@ services:
       --tensor-parallel-size 2
       --dtype half
       --max-model-len 32768
-      --gpu-memory-utilization 0.70
       --disable-log-requests
       --no-enable-prefix-caching
       --download-dir /root/.cache
-      --max-num-seqs 24
-      --max-num-batched-tokens 4096
+      --max-num-seqs 8
+      --max-num-batched-tokens 33000
       --gpu-memory-utilization 0.80
     ports:
       - "0.0.0.0:8000:8000"
