@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 import logging
 from typing import List, Optional, Dict, Any
@@ -12,6 +13,12 @@ from contextlib import asynccontextmanager
 
 # Initialize logger
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _handler.setFormatter(_formatter)
+    logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
 from langchain_core.documents import Document
@@ -599,7 +606,7 @@ def query_endpoint(req: QueryRequest):
     
     context = "\n\n".join(context_parts)
     prompt = f"Answer the question using the context.\n\nContext:\n{context}\n\nQuestion: {req.query}"
-    answer, thoughts = generate_response(prompt)
+    answer, thoughts = generate_response(prompt, max_tokens=1200)
 
     sources = []
     for d in docs:
@@ -762,6 +769,13 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
             conversation_context,
             knowledge_base_context  # ← Передаем контекст из БД!
         )
+        try:
+            logger.info(
+                f"🤖 Решение LLM: уточнения нужны={needs_clarification} "
+                f"(confidence={confidence:.2f}); reason={reason}"
+            )
+        except Exception:
+            pass
         clarification_time = time.time() - clarification_start
         
         # 🆕 Сохраняем информацию об анализе
@@ -786,6 +800,12 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
                 knowledge_base_context,  # ← Передаем контекст из БД!
                 num_questions=3
             )
+            try:
+                logger.info(
+                    "📝 Уточняющие вопросы: " + " | ".join([q.replace("\n", " ") for q in questions])
+                )
+            except Exception:
+                pass
             questions_time = time.time() - questions_start
             
             metadata["decision_process"]["questions_generation"] = {
@@ -1417,6 +1437,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
 3. Используй цитаты источников в формате [#N] где N — номер источника
 4. Будь конкретным и структурированным
 5. Не выдумывай информацию, которой нет в контексте
+Не используй теги <think> и не выводи внутренние размышления. Пиши только финальный ответ.
 6. В конце ответа добавь краткий список использованных источников в формате:
 
 Источники: [#1] название_документа, [#2] название_документа..."""
@@ -1437,7 +1458,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     ]
     
     # Вызываем LLM
-    answer = _call_llm_chat(messages, temperature=0.2, max_tokens=1000)
+    answer = _call_llm_chat(messages, temperature=0.2, max_tokens=2000)
     generation_time = time.time() - generation_start
     
     await session.add_message("assistant", answer, metadata={"stage": "rag_answer", "thread_id": thread_id})

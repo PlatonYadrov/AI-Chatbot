@@ -42,9 +42,9 @@ def _post(path: str, payload: dict) -> dict:
 
 
 def generate_response(
-    prompt: str, 
-    max_tokens: int = 512, 
-    temperature: float = 0.2, 
+    prompt: str,
+    max_tokens: int = 1200,
+    temperature: float = 0.2,
     top_p: float = 0.95,
     stop: Optional[List[str]] = None
 ) -> Tuple[str, str]:
@@ -65,7 +65,13 @@ def generate_response(
         Кортеж (ответ, размышления) где размышления извлекаются из <think> тегов
     """
     messages = [
-        {"role": "system", "content": "Ты полезный и лаконичный ассистент."},
+        {
+            "role": "system",
+            "content": (
+                "Ты полезный и лаконичный ассистент. Не добавляй внутренние размышления и не используй теги <think>. "
+                "Отвечай только финальным текстом ответа."
+            ),
+        },
         {"role": "user", "content": prompt},
     ]
     payload = {
