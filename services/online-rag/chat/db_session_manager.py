@@ -258,12 +258,11 @@ class ChatSession:
     
     async def set_pending_questions(self, questions: List[str]):
         """
-        Установить уточняющие вопросы.
-        
-        Args:
-            questions: Список уточняющих вопросов
+        Устаревшее: больше не сохраняем pending вопросы.
+        Фиксируем только состояние ожидания уточнения.
         """
-        self.pending_questions = questions
+        # Не сохраняем список вопросов, переводим в режим ожидания уточнений
+        self.pending_questions = []
         self.state = "awaiting_clarification"
         self.updated_at = datetime.utcnow()
         await self._save_session()
@@ -279,8 +278,10 @@ class ChatSession:
         self.clarifications[question] = answer
         self.updated_at = datetime.utcnow()
         
-        if len(self.clarifications) >= len(self.pending_questions):
-            self.state = "active"
+        # Переходим в активное состояние сразу после получения ответа
+        self.state = "active"
+        # Больше не используем pending_questions
+        self.pending_questions = []
         
         await self._save_session()
     

@@ -19,6 +19,7 @@ if not logger.handlers:
     _handler.setFormatter(_formatter)
     logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
+logger.propagate = False
 from langchain_community.vectorstores import Qdrant
 from langchain.embeddings.base import Embeddings
 from langchain_core.documents import Document
@@ -1153,7 +1154,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     try:
         logger.info(
             f"🧵 История ветки (thread={thread_id}): {len(history_messages)} сообщений; "
-            f"state={session.state}; pending={len(session.pending_questions or [])}"
+            f"state={session.state}"
         )
         if history_messages:
             preview = []
@@ -1165,6 +1166,11 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     except Exception:
         pass
     
+    # Подготовим вопрос для проверки (учитывая историю диалога), чтобы не делать двойную переформулировку
+    query_for_check = req.query
+    if not req.skip_clarification_check and not req.skip_condensation and len(history_messages) > 1:
+        query_for_check = _condense_question_with_history(req.query, history_messages)
+
     # ===== ШАГ 1: Проверка на необходимость уточнений =====
     # Посчитаем текущий раунд уточнений по ветке
     try:
@@ -1174,7 +1180,6 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         current_round, max_rounds = 0, 2
 
     if (not req.skip_clarification_check
-        and not session.pending_questions
         and current_round < max_rounds):
         # Лёгкий предварительный поиск для генерации уточнения на основании KB
         kb_docs = []
@@ -1185,7 +1190,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             if HYBRID_SEARCH_AVAILABLE:
                 hr = get_global_hybrid_retriever(embeddings)
                 hr.update_k(pre_k)
-                kb_docs = hr.get_relevant_documents(req.query)
+                kb_docs = hr.get_relevant_documents(query_for_check)
             else:
                 vs_pre = CustomQdrant.from_existing_collection(
                     embedding=embeddings,
@@ -1194,7 +1199,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
                     prefer_grpc=False,
                     path=None,
                 )
-                kb_docs = vs_pre.similarity_search(req.query, k=pre_k)
+                kb_docs = vs_pre.similarity_search(query_for_check, k=pre_k)
             parts = []
             for i, d in enumerate(kb_docs[:pre_k], 1):
                 txt = getattr(d, 'page_content', '')
@@ -1205,7 +1210,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             kb_context = ""
         kb_time = time.time() - kb_search_start
         clarification_start = time.time()
-        clarification_result = _check_clarification_needed(req.query, history_messages, kb_context)
+        clarification_result = _check_clarification_needed(query_for_check, history_messages, kb_context)
         clarification_time = time.time() - clarification_start
         
         metadata["steps"]["clarification_check"] = {
@@ -1248,9 +1253,10 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         session.state = "active"
     
     # ===== ШАГ 2: Query Condensation (переформулировка с учетом истории) =====
-    query_for_search = req.query
-    
-    if not req.skip_condensation and len(history_messages) > 1:
+    # Используем уже конденсированный для проверки вариант, чтобы избежать двойной переформулировки
+    query_for_search = query_for_check
+    already_condensed = (query_for_search != req.query)
+    if not req.skip_condensation and len(history_messages) > 1 and not already_condensed:
         condensation_start = time.time()
         query_for_search = _condense_question_with_history(req.query, history_messages)
         condensation_time = time.time() - condensation_start
@@ -1264,13 +1270,14 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             "thread_id": thread_id
         }
         try:
-            logger.info(f"🔄 Переформулировка запроса (thread={thread_id}): '{req.query}' → '{query_for_search}'")
+            logger.debug(f"🔄 Переформулировка запроса (thread={thread_id}): '{req.query}' → '{query_for_search}'")
         except Exception:
             pass
     else:
+        # Либо уже переформулировали ранее для проверки, либо нет смысла
         metadata["steps"]["query_condensation"] = {
-            "performed": False,
-            "reason": "Skipped by request" if req.skip_condensation else "No history"
+            "performed": already_condensed,
+            "reason": "Already condensed for check" if already_condensed else ("Skipped by request" if req.skip_condensation else "No history")
         }
     
     # ===== ШАГ 3: RAG Retrieval (гибридный поиск если доступен) =====
