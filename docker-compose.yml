@@ -110,19 +110,18 @@ services:
       - VLLM_USE_V1=0
       - CUDA_VISIBLE_DEVICES=0,1
     command: >-
-      --model Qwen/Qwen2.5-14B-Instruct-AWQ
+      --model t-tech/T-pro-it-2.0-AWQ
       --quantization awq
       --tensor-parallel-size 2
       --dtype half
-      --rope-theta 1000000
-      --rope-scaling '{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}'
-      --max-model-len 65536
+      --max-model-len 32768
       --gpu-memory-utilization 0.70
       --disable-log-requests
       --no-enable-prefix-caching
       --download-dir /root/.cache
       --max-num-seqs 24
       --max-num-batched-tokens 4096
+      --gpu-memory-utilization 0.80
     ports:
       - "0.0.0.0:8000:8000"
     shm_size: 32g
