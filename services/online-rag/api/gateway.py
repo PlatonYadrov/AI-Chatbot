@@ -4,6 +4,7 @@ import os
 import sys
 import uuid
 import logging
+import re
 from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Query
@@ -1099,7 +1100,7 @@ def chat_endpoint(req: ChatRequest, pretty: bool = Query(True)):
 
 
 @app.post("/chat/conversational", response_model=ConversationalResponse)
-async def conversational_rag_endpoint(req: ConversationalRequest):
+async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool = Query(True)):
     """
     Полноценный конверсационный RAG-пайплайн с историей, query condensation и автоматическими уточнениями.
     
@@ -1232,6 +1233,10 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             session.state = "awaiting_clarification"
             
             metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
+            
+            # Красивый вывод для уточняющих вопросов: вернем только текст вопроса
+            if pretty:
+                return PlainTextResponse(clarification_q)
             
             return ConversationalResponse(
                 session_id=session.session_id,
@@ -1511,6 +1516,39 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         "reranking": metadata["steps"]["reranking"].get("time_ms", 0),
         "generation": metadata["steps"]["generation"]["time_ms"]
     }
+
+    # Соберём плоский список источников для красивого вывода (как в /chat)
+    sourses = []
+    for d in docs:
+        meta = getattr(d, 'metadata', {}) or {}
+        text_content = getattr(d, 'page_content', '')
+        raw_path = (
+            meta.get('path')
+            or meta.get('source_path')
+            or meta.get('source_uri')
+            or meta.get('source')
+            or ''
+        )
+        try:
+            document_name = os.path.basename(str(raw_path)) if raw_path else ''
+        except Exception:
+            document_name = ''
+        if not document_name:
+            document_name = str(meta.get('doc_id') or 'unknown')
+        source_path = raw_path or ''
+        sourses.append({
+            'text': text_content,
+            'document': document_name,
+            'path': source_path
+        })
+
+    if pretty:
+        # Для красивого вывода убираем внутренние размышления
+        try:
+            cleaned_answer = re.sub(r"<think>.*?</think>\s*", "", answer, flags=re.S).strip()
+        except Exception:
+            cleaned_answer = answer
+        return PlainTextResponse(_format_qna(req.query, cleaned_answer, sourses))
     
     return ConversationalResponse(
         session_id=session.session_id,
