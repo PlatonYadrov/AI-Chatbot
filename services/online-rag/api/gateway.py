@@ -1435,9 +1435,13 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         "thread_id": thread_id
     }
     try:
+        examples = []
+        for m in history_for_prompt[-2:]:
+            role = m.get('role')
+            content_preview = (m.get('content') or '').replace('\n', ' ')[:80]
+            examples.append((role, content_preview))
         logger.info(
-            f"🧾 Генерация (thread={thread_id}): history_used={len(history_for_prompt)}; "
-            f"examples={[ (m.get('role'), (m.get('content') or '')[:80].replace('\n',' ')) for m in history_for_prompt[-2:] ]}"
+            f"🧾 Генерация (thread={thread_id}): history_used={len(history_for_prompt)}; examples={examples}"
         )
     except Exception:
         pass
