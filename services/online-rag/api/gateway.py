@@ -360,6 +360,10 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
     ]
     
     response = _call_llm_chat(messages, temperature=0.1, max_tokens=300)
+    try:
+        logger.info(f"🤖 LLM raw clarification response: {response}")
+    except Exception:
+        pass
     
     # Парсим JSON
     import json
@@ -375,7 +379,15 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
             clarification = result.get("clarification_question", "").strip()
             reason = result.get("reason", "").strip()
             
-            logger.info(f"🔍 Clarification check: need={need}, reason={reason}")
+            try:
+                clarification_preview = clarification.replace("\n", " ")[:160]
+                logger.info(
+                    f"🤖 LLM decision (in _check_clarification_needed): "
+                    f"need_clarification={need}; reason={reason}; "
+                    f"question={clarification_preview}"
+                )
+            except Exception:
+                pass
             
             return {
                 "need_clarification": need,
