@@ -29,17 +29,19 @@ Base = declarative_base()
 
 
 class ChatSessionDB(Base):
-    """SQLAlchemy модель для хранения сессий чата."""
+    """SQLAlchemy модель для хранения сессий чата (numeric id + name)."""
     
     __tablename__ = "chat_sessions"
     
-    session_id = Column(String(255), primary_key=True)
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True, nullable=False)
     state = Column(String(50), nullable=False, default="initial")
-    context = Column(JSONB, default={})
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     pending_questions = Column(JSONB, default=[])
     clarifications = Column(JSONB, default={})
+    current_thread_id = Column(BigInteger, nullable=False, default=0)
+    max_clarification_rounds = Column(BigInteger, nullable=False, default=2)
     
     messages = relationship("ChatMessageDB", back_populates="session", cascade="all, delete-orphan")
     
@@ -55,10 +57,13 @@ class ChatMessageDB(Base):
     __tablename__ = "chat_messages"
     
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    session_id = Column(String(255), ForeignKey("chat_sessions.session_id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(BigInteger, ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
     role = Column(String(50), nullable=False)
     content = Column(Text, nullable=False)
-    metadata = Column(JSONB, default={})
+    message_metadata = Column('metadata', JSONB, default={})
+    stage = Column(String(50), nullable=False, default='user_question')
+    thread_id = Column(BigInteger, nullable=False, default=0)
+    round = Column(BigInteger, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     
     session = relationship("ChatSessionDB", back_populates="messages")
@@ -133,10 +138,10 @@ class ChatSession:
     
     def __init__(
         self,
-        session_id: str = None,
-        db_session: Session = None,
+        session_id: int = None,
+        session_name: str = None,
+        db_session: AsyncSession = None,
         state: str = "initial",
-        context: Dict = None,
         created_at: datetime = None,
         updated_at: datetime = None,
         pending_questions: List[str] = None,
@@ -155,9 +160,9 @@ class ChatSession:
             pending_questions: Ожидающие уточнения
             clarifications: Ответы на уточнения
         """
-        self.session_id = session_id or str(uuid.uuid4())
+        self.session_id = session_id
+        self.session_name = session_name
         self.state = state
-        self.context = context or {}
         self.created_at = created_at or datetime.utcnow()
         self.updated_at = updated_at or datetime.utcnow()
         self.pending_questions = pending_questions or []
@@ -204,7 +209,7 @@ class ChatSession:
                     "role": msg.role,
                     "content": msg.content,
                     "timestamp": msg.created_at.isoformat(),
-                    "metadata": msg.metadata or {}
+                    "metadata": msg.message_metadata or {}
                 }
                 for msg in messages_db
             ]
@@ -226,11 +231,15 @@ class ChatSession:
             return
         
         try:
+            meta = metadata or {}
             message = ChatMessageDB(
                 session_id=self.session_id,
                 role=role,
                 content=content,
-                metadata=metadata or {},
+                message_metadata=meta,
+                stage=str(meta.get('stage') or 'user_question'),
+                thread_id=int(meta.get('thread_id') or 0),
+                round=int(meta.get('round') or 0),
                 created_at=datetime.utcnow()
             )
             self._db_session.add(message)
@@ -282,26 +291,18 @@ class ChatSession:
         
         try:
             result = await self._db_session.execute(
-                select(ChatSessionDB).filter(ChatSessionDB.session_id == self.session_id)
+                select(ChatSessionDB).filter(ChatSessionDB.id == self.session_id)
             )
             session_db = result.scalar_one_or_none()
             
             if session_db:
                 session_db.state = self.state
-                session_db.context = self.context
                 session_db.updated_at = self.updated_at
                 session_db.pending_questions = self.pending_questions
                 session_db.clarifications = self.clarifications
             else:
-                session_db = ChatSessionDB(
-                    session_id=self.session_id,
-                    state=self.state,
-                    context=self.context,
-                    created_at=self.created_at,
-                    updated_at=self.updated_at,
-                    pending_questions=self.pending_questions,
-                    clarifications=self.clarifications
-                )
+                # Создание сессии без имени через saver не поддерживается
+                raise RuntimeError("ChatSession save called for missing session id")
                 self._db_session.add(session_db)
             
             await self._db_session.commit()
@@ -359,13 +360,90 @@ class ChatSession:
         return {
             "session_id": self.session_id,
             "messages": self.messages,
-            "context": self.context,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "state": self.state,
             "pending_questions": self.pending_questions,
             "clarifications": self.clarifications
         }
+
+    # ===== Thread helpers =====
+    async def get_max_rounds(self) -> int:
+        if self._db_session is None:
+            return 2
+        result = await self._db_session.execute(
+            select(ChatSessionDB.max_clarification_rounds).filter(ChatSessionDB.id == self.session_id)
+        )
+        val = result.scalar_one_or_none()
+        return int(val or 2)
+
+    async def set_max_rounds(self, n: int) -> None:
+        if self._db_session is None:
+            return
+        async with self._db_session.begin():
+            result = await self._db_session.execute(
+                select(ChatSessionDB).filter(ChatSessionDB.id == self.session_id)
+            )
+            row = result.scalar_one_or_none()
+            if row:
+                row.max_clarification_rounds = int(max(0, n))
+
+    async def resolve_thread_id_for_new_user_question(self) -> int:
+        if self._db_session is None:
+            return 0
+        # Получим последнюю ассистентскую стадию
+        last_assistant = await self._db_session.execute(
+            select(ChatMessageDB).filter(
+                ChatMessageDB.session_id == self.session_id
+            ).order_by(ChatMessageDB.created_at.desc()).limit(1)
+        )
+        last = last_assistant.scalar_one_or_none()
+        # Если последний ответ был финальным RAG, начинаем новую ветку
+        start_new = bool(last and last.stage == 'rag_answer')
+        # Получим/обновим current_thread_id
+        result = await self._db_session.execute(
+            select(ChatSessionDB).filter(ChatSessionDB.id == self.session_id)
+        )
+        sess = result.scalar_one_or_none()
+        if not sess:
+            return 0
+        if start_new:
+            sess.current_thread_id = int(sess.current_thread_id or 0) + 1
+            await self._db_session.commit()
+        return int(sess.current_thread_id or 0)
+
+    async def get_thread_messages(self, thread_id: int) -> List[Dict]:
+        if self._db_session is None:
+            return []
+        res = await self._db_session.execute(
+            select(ChatMessageDB).filter(
+                ChatMessageDB.session_id == self.session_id,
+                ChatMessageDB.thread_id == int(thread_id)
+            ).order_by(ChatMessageDB.created_at)
+        )
+        rows = res.scalars().all()
+        out = []
+        for r in rows:
+            out.append({
+                "role": r.role,
+                "content": r.content,
+                "timestamp": r.created_at.isoformat(),
+                "metadata": r.message_metadata or {}
+            })
+        return out
+
+    async def get_thread_round_count(self, thread_id: int) -> int:
+        if self._db_session is None:
+            return 0
+        res = await self._db_session.execute(
+            select(ChatMessageDB).filter(
+                ChatMessageDB.session_id == self.session_id,
+                ChatMessageDB.thread_id == int(thread_id),
+                ChatMessageDB.stage == 'clarification_answer'
+            )
+        )
+        cnt = len(res.scalars().all())
+        return cnt
 
 
 class PostgresSessionManager:
@@ -386,7 +464,7 @@ class PostgresSessionManager:
             await self.db_manager.initialize()
             self._initialized = True
     
-    async def create_session(self) -> ChatSession:
+    async def create_session(self, session_name: str) -> ChatSession:
         """
         Создать новую сессию.
         
@@ -394,13 +472,11 @@ class PostgresSessionManager:
             Новый объект ChatSession
         """
         async with self.db_manager.get_session() as db_session:
-            session_id = str(uuid.uuid4())
             
             try:
                 session_db = ChatSessionDB(
-                    session_id=session_id,
+                    name=session_name,
                     state="initial",
-                    context={},
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow(),
                     pending_questions=[],
@@ -413,12 +489,13 @@ class PostgresSessionManager:
                 new_db_session = self.db_manager.get_session()
                 
                 chat_session = ChatSession(
-                    session_id=session_id,
+                    session_id=session_db.id,
+                    session_name=session_name,
                     db_session=new_db_session,
                     state="initial"
                 )
                 
-                logger.info(f"✅ Created new session: {session_id}")
+                logger.info(f"✅ Created new session: id={session_db.id}, name={session_name}")
                 return chat_session
                 
             except Exception as e:
@@ -426,7 +503,7 @@ class PostgresSessionManager:
                 await db_session.rollback()
                 raise
     
-    async def get_session(self, session_id: str) -> Optional[ChatSession]:
+    async def get_session(self, session_id: int) -> Optional[ChatSession]:
         """
         Получить существующую сессию по ID.
         
@@ -439,7 +516,7 @@ class PostgresSessionManager:
         async with self.db_manager.get_session() as db_session:
             try:
                 result = await db_session.execute(
-                    select(ChatSessionDB).filter(ChatSessionDB.session_id == session_id)
+                    select(ChatSessionDB).filter(ChatSessionDB.id == session_id)
                 )
                 session_db = result.scalar_one_or_none()
                 
@@ -457,15 +534,17 @@ class PostgresSessionManager:
                 new_db_session = self.db_manager.get_session()
                 
                 chat_session = ChatSession(
-                    session_id=session_db.session_id,
+                    session_id=session_db.id,
+                    session_name=session_db.name,
                     db_session=new_db_session,
                     state=session_db.state,
-                    context=session_db.context or {},
                     created_at=session_db.created_at,
                     updated_at=session_db.updated_at,
                     pending_questions=session_db.pending_questions or [],
                     clarifications=session_db.clarifications or {}
                 )
+                # Сохраним текущую конфигурацию лимита раундов в metadata для использования в API
+                # (получать через отдельные методы ниже)
                 
                 # Preload messages
                 await chat_session._load_messages()
@@ -476,7 +555,7 @@ class PostgresSessionManager:
                 logger.error(f"❌ Failed to get session {session_id}: {e}")
                 return None
     
-    async def get_or_create_session(self, session_id: Optional[str]) -> ChatSession:
+    async def get_or_create_session_by_name(self, session_name: Optional[str]) -> ChatSession:
         """
         Получить существующую сессию или создать новую.
         
@@ -486,12 +565,35 @@ class PostgresSessionManager:
         Returns:
             ChatSession
         """
-        if session_id:
-            session = await self.get_session(session_id)
-            if session:
-                return session
+        name = (session_name or "").strip()
+        if not name:
+            raise ValueError("session_name is required")
         
-        return await self.create_session()
+        # Ищем по имени
+        async with self.db_manager.get_session() as db_session:
+            result = await db_session.execute(
+                select(ChatSessionDB).filter(ChatSessionDB.name == name)
+            )
+            session_db = result.scalar_one_or_none()
+            
+            if session_db:
+                # Возвращаем существующую
+                new_db_session = self.db_manager.get_session()
+                chat_session = ChatSession(
+                    session_id=session_db.id,
+                    session_name=session_db.name,
+                    db_session=new_db_session,
+                    state=session_db.state,
+                    created_at=session_db.created_at,
+                    updated_at=session_db.updated_at,
+                    pending_questions=session_db.pending_questions or [],
+                    clarifications=session_db.clarifications or {}
+                )
+                await chat_session._load_messages()
+                return chat_session
+        
+        # Нет — создаем новую по имени
+        return await self.create_session(name)
     
     async def delete_session(self, session_id: str):
         """

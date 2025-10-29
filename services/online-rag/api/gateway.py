@@ -425,8 +425,9 @@ def _format_docs_with_citations(docs: List[Document]) -> tuple[str, List[Dict]]:
 class ConversationalRequest(BaseModel):
     """Запрос для конверсационного RAG пайплайна."""
     query: str
-    session_id: Optional[str] = None
+    session_name: Optional[str] = None
     k: int = 5  # Количество документов для retrieval
+    max_clarification_rounds: Optional[int] = None
     use_reranking: bool = True
     rerank_top_k: Optional[int] = None
     skip_condensation: bool = False  # Пропустить переформулировку вопроса
@@ -435,7 +436,8 @@ class ConversationalRequest(BaseModel):
 
 class ConversationalResponse(BaseModel):
     """Ответ конверсационного RAG пайплайна."""
-    session_id: str
+    session_id: int
+    session_name: Optional[str] = None
     state: str  # "awaiting_clarification" или "completed"
     
     # Если нужны уточнения
@@ -1078,15 +1080,33 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     # Инициализируем embeddings
     embeddings = TEIEmbeddings()
     
-    # Получаем или создаем сессию
-    session = await session_manager.get_or_create_session(req.session_id)
-    await session.add_message("user", req.query)
+    # Получаем или создаем сессию по имени
+    session = await session_manager.get_or_create_session_by_name(req.session_name)
+    # Установим лимит раундов если передан
+    if req.max_clarification_rounds is not None:
+        try:
+            await session.set_max_rounds(int(req.max_clarification_rounds))
+        except Exception:
+            pass
+    
+    # Определяем/создаем ветку для этого вопроса
+    thread_id = await session.resolve_thread_id_for_new_user_question()
+    await session.add_message("user", req.query, metadata={"stage": "user_question", "thread_id": thread_id, "round": 0})
     
     # Получаем историю для обработки
-    history_messages = await session.get_messages()
+    history_messages = await session.get_thread_messages(thread_id)
     
     # ===== ШАГ 1: Проверка на необходимость уточнений =====
-    if not req.skip_clarification_check and session.state == "initial":
+    # Посчитаем текущий раунд уточнений по ветке
+    try:
+        current_round = await session.get_thread_round_count(thread_id)
+        max_rounds = await session.get_max_rounds()
+    except Exception:
+        current_round, max_rounds = 0, 2
+
+    if (not req.skip_clarification_check
+        and not session.pending_questions
+        and current_round < max_rounds):
         clarification_start = time.time()
         clarification_result = _check_clarification_needed(req.query, history_messages)
         clarification_time = time.time() - clarification_start
@@ -1100,7 +1120,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         
         if clarification_result["need_clarification"]:
             clarification_q = clarification_result["clarification_question"]
-            await session.add_message("assistant", clarification_q)
+            await session.add_message("assistant", clarification_q, metadata={"stage": "clarification_request", "thread_id": thread_id, "round": current_round + 1})
             await session.set_pending_questions([clarification_q])
             session.state = "awaiting_clarification"
             
@@ -1108,6 +1128,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             
             return ConversationalResponse(
                 session_id=session.session_id,
+                session_name=session.session_name,
                 state="awaiting_clarification",
                 clarification_question=clarification_q,
                 clarification_reason=clarification_result["reason"],
@@ -1138,6 +1159,10 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             "condensed_query": query_for_search,
             "time_ms": round(condensation_time * 1000, 2)
         }
+        try:
+            logger.info(f"🔄 Переформулировка запроса (thread={thread_id}): '{req.query}' → '{query_for_search}'")
+        except Exception:
+            pass
     else:
         metadata["steps"]["query_condensation"] = {
             "performed": False,
@@ -1156,6 +1181,10 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             logger.info("🔍 Using hybrid search for conversational RAG")
             hybrid_retriever = get_global_hybrid_retriever(embeddings)
             hybrid_retriever.update_k(initial_k)
+            try:
+                logger.info(f"🔎 Поисковый запрос (thread={thread_id}): '{query_for_search}' (orig='{req.query}') k={initial_k}")
+            except Exception:
+                pass
             docs = hybrid_retriever.get_relevant_documents(query_for_search)
             search_method = "hybrid"
         except Exception as e:
@@ -1178,6 +1207,10 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             prefer_grpc=False,
             path=None,
         )
+        try:
+            logger.info(f"🔎 Поисковый запрос (thread={thread_id}): '{query_for_search}' (orig='{req.query}') k={initial_k}")
+        except Exception:
+            pass
         docs = vs.similarity_search(query_for_search, k=initial_k)
         search_method = "vector"
     
@@ -1203,6 +1236,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         
         return ConversationalResponse(
             session_id=session.session_id,
+            session_name=session.session_name,
             state="completed",
             answer=error_msg,
             citations=[],
@@ -1278,6 +1312,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         
         return ConversationalResponse(
             session_id=session.session_id,
+            session_name=session.session_name,
             state="completed",
             answer=error_msg,
             citations=[],
@@ -1333,7 +1368,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     answer = _call_llm_chat(messages, temperature=0.2, max_tokens=1000)
     generation_time = time.time() - generation_start
     
-    await session.add_message("assistant", answer)
+    await session.add_message("assistant", answer, metadata={"stage": "rag_answer", "thread_id": thread_id})
     
     metadata["steps"]["generation"] = {
         "model": LLM_MODEL,
@@ -1355,6 +1390,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     
     return ConversationalResponse(
         session_id=session.session_id,
+        session_name=session.session_name,
         state="completed",
         answer=answer,
         citations=citations,
@@ -1365,7 +1401,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
 
 
 @app.delete("/chat/{session_id}")
-async def delete_chat_session(session_id: str):
+async def delete_chat_session(session_id: int):
     """
     Удалить сессию диалога.
     
@@ -1382,7 +1418,7 @@ async def delete_chat_session(session_id: str):
 
 
 @app.get("/chat/{session_id}")
-async def get_chat_session(session_id: str):
+async def get_chat_session(session_id: int):
     """
     Получить информацию о сессии диалога.
     

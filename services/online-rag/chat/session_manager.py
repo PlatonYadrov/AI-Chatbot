@@ -1,6 +1,6 @@
 """Менеджер сессий для диалогового RAG чатбота.
 
-Зачем: Хранение истории диалогов, состояния уточняющих вопросов и контекста беседы.
+Зачем: Хранение истории диалогов и состояния уточняющих вопросов.
 Каждая сессия имеет уникальный ID и хранит все сообщения пользователя и ассистента.
 """
 
@@ -21,7 +21,7 @@ class ChatSession:
     """
     Представляет одну сессию диалога с пользователем.
     
-    Зачем: Хранит всю историю диалога, состояние уточнений и контекст.
+    Зачем: Хранит всю историю диалога и состояние уточнений.
     Позволяет LLM учитывать предыдущие сообщения при генерации ответа.
     """
     
@@ -34,7 +34,6 @@ class ChatSession:
         """
         self.session_id = session_id or str(uuid.uuid4())
         self.messages: List[Dict] = []  # История всех сообщений
-        self.context: Dict = {}  # Дополнительный контекст (метаданные)
         self.created_at = datetime.now()
         self.updated_at = datetime.now()
         
@@ -159,7 +158,6 @@ class ChatSession:
         return {
             "session_id": self.session_id,
             "messages": self.messages,
-            "context": self.context,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "state": self.state,
