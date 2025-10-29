@@ -297,39 +297,55 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
             elif role == "assistant":
                 history_text += f"Assistant: {content}\n"
     
-    history_section = f"\nИстория диалога:\n{history_text}" if history_text else ""
-    kb_section = ""
+    # Явно помечаем секции для LLM
+    history_section = (
+        f"\n## ИСТОРИЯ_ДИАЛОГА (текущий тред)\n{history_text}" if history_text else "\n## ИСТОРИЯ_ДИАЛОГА\n—"
+    )
+    kb_section = "\n## КОНТЕКСТ_БАЗЫ_ЗНАНИЙ\n—"
     if kb_context:
-        # Ограничим размер для промпта
+        # Ограничим размер для промпта, чтобы избежать переполнения контекста
         kb_snippet = kb_context[:2000]
-        kb_section = f"\nКонтекст из базы знаний (фрагменты):\n{kb_snippet}"
+        kb_section = f"\n## КОНТЕКСТ_БАЗЫ_ЗНАНИЙ (фрагменты)\n{kb_snippet}"
     
     messages = [
         {
             "role": "system",
-            "content": """Определи, достаточно ли информации в вопросе для выполнения поиска в базе знаний и предоставления точного ответа.
+            "content": """# РОЛЬ
+Ты — классификатор необходимости уточнений.
 
-Вопрос требует уточнения если:
-- Содержит неоднозначные местоимения (это, тот, та) без контекста
-- Слишком общий/широкий (например "расскажи о компании")
-- Отсутствуют критичные параметры (даты, имена, типы документов)
-- Неясно о чем конкретно спрашивается
+# ЦЕЛЬ
+Определить, нужны ли уточняющие вопросы для текущего запроса пользователя.
 
-НЕ требует уточнения если:
-- Вопрос конкретный и понятный
-- Есть достаточный контекст в истории диалога
-- Можно выполнить осмысленный поиск
+# ИНСТРУКЦИИ
+- Учитывай ИСТОРИЮ_ДИАЛОГА, чтобы снять неоднозначность (местоимения, ссылки на ранее сказанное).
+- Для фактов опирайся на КОНТЕКСТ_БАЗЫ_ЗНАНИЙ; если он отсутствует, принимай решение без него.
+- Оцени, достаточно ли информации, чтобы выбрать один однозначный ответ без уточнений.
 
-Верни JSON со структурой:
+# КРИТЕРИИ ДЛЯ УТОЧНЕНИЙ
+- Запрос неоднозначен или слишком общий.
+- Отсутствуют критичные параметры (даты, имена, типы и т.д.).
+- В КОНТЕКСТЕ_БАЗЫ_ЗНАНИЙ встречаются 2+ разных категории/аспекта, между которыми нужен выбор.
+
+# КРИТЕРИИ, КОГДА УТОЧНЕНИЯ НЕ НУЖНЫ
+- Запрос конкретный и понятный.
+- История текущего треда уже снимает неоднозначность.
+- Можно выполнить осмысленный поиск и выбрать однозначный ответ.
+
+# ФОРМАТ ОТВЕТА (JSON)
 {
   "need_clarification": true/false,
   "clarification_question": "краткий вопрос для уточнения (если need_clarification=true)",
   "reason": "краткая причина"
-}"""
+}
+"""
         },
         {
             "role": "user",
-            "content": f"""Вопрос пользователя: {question}{history_section}{kb_section}
+            "content": f"""# ВХОДНЫЕ ДАННЫЕ
+## ВОПРОС
+{question}
+{history_section}
+{kb_section}
 
 Верни ТОЛЬКО валидный JSON без дополнительного текста."""
         }
@@ -1185,7 +1201,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
                 state="awaiting_clarification",
                 clarification_question=clarification_q,
                 clarification_reason=clarification_result["reason"],
-                conversation_history=await session.get_messages(),
+                conversation_history=await session.get_thread_messages(thread_id),
                 metadata=metadata
             )
     else:
@@ -1296,7 +1312,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             answer=error_msg,
             citations=[],
             condensed_query=query_for_search if not req.skip_condensation else None,
-            conversation_history=await session.get_messages(),
+            conversation_history=await session.get_thread_messages(thread_id),
             metadata=metadata
         )
     
@@ -1372,7 +1388,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             answer=error_msg,
             citations=[],
             condensed_query=query_for_search if not req.skip_condensation else None,
-            conversation_history=await session.get_messages(),
+            conversation_history=await session.get_thread_messages(thread_id),
             metadata=metadata
         )
     
@@ -1462,7 +1478,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         answer=answer,
         citations=citations,
         condensed_query=query_for_search if not req.skip_condensation else None,
-        conversation_history=await session.get_messages(),
+        conversation_history=await session.get_thread_messages(thread_id),
         metadata=metadata
     )
 
