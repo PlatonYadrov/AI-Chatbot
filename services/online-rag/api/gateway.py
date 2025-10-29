@@ -270,7 +270,7 @@ def _condense_question_with_history(question: str, history_messages: List[Dict])
     return condensed.strip()
 
 
-def _check_clarification_needed(question: str, history_messages: List[Dict]) -> Dict[str, Any]:
+def _check_clarification_needed(question: str, history_messages: List[Dict], kb_context: Optional[str] = None) -> Dict[str, Any]:
     """
     Определяет нужны ли уточнения для ответа на вопрос.
     
@@ -298,6 +298,11 @@ def _check_clarification_needed(question: str, history_messages: List[Dict]) -> 
                 history_text += f"Assistant: {content}\n"
     
     history_section = f"\nИстория диалога:\n{history_text}" if history_text else ""
+    kb_section = ""
+    if kb_context:
+        # Ограничим размер для промпта
+        kb_snippet = kb_context[:2000]
+        kb_section = f"\nКонтекст из базы знаний (фрагменты):\n{kb_snippet}"
     
     messages = [
         {
@@ -324,7 +329,7 @@ def _check_clarification_needed(question: str, history_messages: List[Dict]) -> 
         },
         {
             "role": "user",
-            "content": f"""Вопрос пользователя: {question}{history_section}
+            "content": f"""Вопрос пользователя: {question}{history_section}{kb_section}
 
 Верни ТОЛЬКО валидный JSON без дополнительного текста."""
         }
@@ -1095,6 +1100,21 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     
     # Получаем историю для обработки
     history_messages = await session.get_thread_messages(thread_id)
+    # Логирование истории ветки для контроля учета контекста
+    try:
+        logger.info(
+            f"🧵 История ветки (thread={thread_id}): {len(history_messages)} сообщений; "
+            f"state={session.state}; pending={len(session.pending_questions or [])}"
+        )
+        if history_messages:
+            preview = []
+            for m in history_messages[-5:]:
+                role = m.get('role', 'user')
+                content = (m.get('content') or '')[:120].replace('\n', ' ')
+                preview.append(f"{role}: {content}")
+            logger.info("📝 История (последние): " + " | ".join(preview))
+    except Exception:
+        pass
     
     # ===== ШАГ 1: Проверка на необходимость уточнений =====
     # Посчитаем текущий раунд уточнений по ветке
@@ -1107,15 +1127,48 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
     if (not req.skip_clarification_check
         and not session.pending_questions
         and current_round < max_rounds):
+        # Лёгкий предварительный поиск для генерации уточнения на основании KB
+        kb_docs = []
+        kb_context = ""
+        kb_search_start = time.time()
+        try:
+            pre_k = 5
+            if HYBRID_SEARCH_AVAILABLE:
+                hr = get_global_hybrid_retriever(embeddings)
+                hr.update_k(pre_k)
+                kb_docs = hr.get_relevant_documents(req.query)
+            else:
+                vs_pre = CustomQdrant.from_existing_collection(
+                    embedding=embeddings,
+                    collection_name=QDRANT_COLLECTION,
+                    url=QDRANT_URL,
+                    prefer_grpc=False,
+                    path=None,
+                )
+                kb_docs = vs_pre.similarity_search(req.query, k=pre_k)
+            parts = []
+            for i, d in enumerate(kb_docs[:pre_k], 1):
+                txt = getattr(d, 'page_content', '')
+                if txt:
+                    parts.append(f"Документ {i}:\n{txt}")
+            kb_context = "\n\n".join(parts)
+        except Exception:
+            kb_context = ""
+        kb_time = time.time() - kb_search_start
         clarification_start = time.time()
-        clarification_result = _check_clarification_needed(req.query, history_messages)
+        clarification_result = _check_clarification_needed(req.query, history_messages, kb_context)
         clarification_time = time.time() - clarification_start
         
         metadata["steps"]["clarification_check"] = {
             "performed": True,
             "need_clarification": clarification_result["need_clarification"],
             "reason": clarification_result["reason"],
-            "time_ms": round(clarification_time * 1000, 2)
+            "time_ms": round(clarification_time * 1000, 2),
+            "kb_used": bool(kb_context),
+            "kb_search_ms": round(kb_time * 1000, 2) if kb_context else 0,
+            "history_len": len(history_messages),
+            "round": current_round,
+            "max_rounds": max_rounds
         }
         
         if clarification_result["need_clarification"]:
@@ -1157,7 +1210,9 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
             "performed": True,
             "original_query": req.query,
             "condensed_query": query_for_search,
-            "time_ms": round(condensation_time * 1000, 2)
+            "time_ms": round(condensation_time * 1000, 2),
+            "history_len": len(history_messages),
+            "thread_id": thread_id
         }
         try:
             logger.info(f"🔄 Переформулировка запроса (thread={thread_id}): '{req.query}' → '{query_for_search}'")
@@ -1376,8 +1431,16 @@ async def conversational_rag_endpoint(req: ConversationalRequest):
         "temperature": 0.2,
         "context_length": len(context),
         "history_messages_used": len(history_for_prompt),
-        "time_ms": round(generation_time * 1000, 2)
+        "time_ms": round(generation_time * 1000, 2),
+        "thread_id": thread_id
     }
+    try:
+        logger.info(
+            f"🧾 Генерация (thread={thread_id}): history_used={len(history_for_prompt)}; "
+            f"examples={[ (m.get('role'), (m.get('content') or '')[:80].replace('\n',' ')) for m in history_for_prompt[-2:] ]}"
+        )
+    except Exception:
+        pass
     
     metadata["timing"]["total_ms"] = round((time.time() - start_time) * 1000, 2)
     metadata["timing"]["breakdown"] = {
