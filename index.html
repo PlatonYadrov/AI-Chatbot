@@ -5,6 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>RAG Chat — минимальный UI</title>
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <script>
+    // Auto-configure endpoint and defaults BEFORE other scripts
+    (function() {
+      const settingsKey = 'rag-chat-settings-v1';
+      const stored = JSON.parse(localStorage.getItem(settingsKey) || '{}');
+      
+      // Always set defaults if not present
+      let updated = false;
+      
+      if (!stored.endpoint) {
+        // Try to auto-detect endpoint, or use default
+        const autoEndpoint = window.location.protocol === 'file:' 
+          ? 'http://localhost:7000/chat/conversational'
+          : `${window.location.protocol}//${window.location.host}/chat/conversational`;
+        stored.endpoint = autoEndpoint;
+        updated = true;
+        console.log('✅ Auto-configured endpoint:', autoEndpoint);
+      }
+      
+      // Ensure defaults are always set
+      if (!stored.k) { stored.k = '5'; updated = true; }
+      if (!stored.maxClarificationRounds) { stored.maxClarificationRounds = '2'; updated = true; }
+      if (!stored.rerankTopK) { stored.rerankTopK = '0'; updated = true; }
+      if (stored.useReranking === undefined) { stored.useReranking = true; updated = true; }
+      if (stored.skipCondensation === undefined) { stored.skipCondensation = false; updated = true; }
+      if (stored.skipClarificationCheck === undefined) { stored.skipClarificationCheck = false; updated = true; }
+      
+      if (updated) {
+        localStorage.setItem(settingsKey, JSON.stringify(stored));
+        console.log('✅ Defaults configured: max_clarification_rounds=2, k=5, reranking=true');
+      }
+    })();
+  </script>
   <style>
     :root { --bg:#0b0f14; --panel:#121821; --muted:#8aa0b5; --text:#e6edf3; --accent:#4ea1ff; --accent-2:#58d68d; --danger:#ff6b6b; --warning:#ffb86b; }
     * { box-sizing: border-box; }
@@ -43,8 +76,9 @@
     .composer { position:sticky; bottom:0; padding:12px 16px; background:linear-gradient(180deg, rgba(11,15,20,0), rgba(11,15,20,0.7) 30%, rgba(11,15,20,1) 55%); }
     .composer-inner { max-width:860px; margin:0 auto; border:1px solid #233244; background:#0f1620; border-radius:16px; padding:10px; display:flex; gap:8px; }
     textarea { flex:1; resize:vertical; min-height:42px; max-height:180px; border:none; outline:none; font:inherit; color:var(--text); background:transparent; }
+    textarea:disabled { opacity:.6; cursor:not-allowed; }
     .send { padding:10px 14px; border-radius:12px; border:1px solid #2b66a8; background:#10233a; color:#d6e8ff; cursor:pointer; }
-    .send:disabled { opacity:.6; cursor:not-allowed; }
+    .send:disabled { opacity:.6; cursor:not-allowed; background:#0a1520; border-color:#1a3050; }
 
     .row { display:flex; gap:8px; align-items:center; }
     .grow { flex:1; }
