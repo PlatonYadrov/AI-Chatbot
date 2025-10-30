@@ -260,7 +260,9 @@ def _condense_question_with_history(
     Returns:
         Переформулированный самостоятельный вопрос
     """
-    if not history_messages or len(history_messages) <= 1:
+    # Если нет истории, но есть вспомогательные суммаризации прошлых веток — всё равно выполняем переформулировку,
+    # чтобы учесть их как справочную информацию. Если нет ни истории, ни суммаризаций — возвращаем исходный вопрос.
+    if (not history_messages or len(history_messages) <= 1) and not (aux_summaries and len(aux_summaries) > 0):
         return question
     
     # Формируем историю для промпта (последние 8 сообщений для контекста)
@@ -1219,7 +1221,9 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     
     # Определяем/создаем ветку для этого вопроса
     thread_id = await session.resolve_thread_id_for_new_user_question()
-    await session.add_message("user", req.query, metadata={"stage": "user_question", "thread_id": thread_id, "round": 0})
+    # Если мы находимся в состоянии ожидания уточнения, считаем это ответом на уточнение
+    user_stage = "clarification_answer" if getattr(session, "state", "initial") == "awaiting_clarification" else "user_question"
+    await session.add_message("user", req.query, metadata={"stage": user_stage, "thread_id": thread_id, "round": 0})
     
     # Получаем историю для обработки
     history_messages = await session.get_thread_messages(thread_id)
@@ -1248,7 +1252,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
 
     # Подготовим вопрос для проверки (учитывая историю диалога), чтобы не делать двойную переформулировку
     query_for_check = req.query
-    if not req.skip_clarification_check and not req.skip_condensation and len(history_messages) > 1:
+    if not req.skip_clarification_check and not req.skip_condensation:
         query_for_check = _condense_question_with_history(req.query, history_messages, aux_summaries)
 
     # ===== ШАГ 1: Проверка на необходимость уточнений =====
@@ -1340,7 +1344,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     # Используем уже конденсированный для проверки вариант, чтобы избежать двойной переформулировки
     query_for_search = query_for_check
     already_condensed = (query_for_search != req.query)
-    if not req.skip_condensation and len(history_messages) > 1 and not already_condensed:
+    if not req.skip_condensation and not already_condensed:
         condensation_start = time.time()
         query_for_search = _condense_question_with_history(req.query, history_messages, aux_summaries)
         condensation_time = time.time() - condensation_start
@@ -1361,7 +1365,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
         # Либо уже переформулировали ранее для проверки, либо нет смысла
         metadata["steps"]["query_condensation"] = {
             "performed": already_condensed,
-            "reason": "Already condensed for check" if already_condensed else ("Skipped by request" if req.skip_condensation else "No history")
+            "reason": "Already condensed for check" if already_condensed else ("Skipped by request" if req.skip_condensation else "Not needed")
         }
     
     # ===== ШАГ 3: RAG Retrieval (гибридный поиск если доступен) =====
