@@ -243,7 +243,11 @@ def _call_llm_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max
         raise HTTPException(status_code=500, detail=f"LLM error: {str(e)}")
 
 
-def _condense_question_with_history(question: str, history_messages: List[Dict]) -> str:
+def _condense_question_with_history(
+    question: str,
+    history_messages: List[Dict],
+    aux_summaries: Optional[List[str]] = None,
+) -> str:
     """
     Переформулирует вопрос пользователя в самостоятельный с учетом истории диалога.
     
@@ -269,16 +273,34 @@ def _condense_question_with_history(question: str, history_messages: List[Dict])
         elif role == "assistant":
             history_text += f"Ассистент: {content}\n"
     
+    aux_section = ""
+    if aux_summaries:
+        try:
+            top3 = aux_summaries[:3]
+            joined = "\n".join([f"- {s}" for s in top3])
+            aux_section = (
+                "\nДополнительные сведения из прошлых веток (используй ТОЛЬКО при сильной неоднозначности,"
+                " как вспомогательный контекст; не подменяй текущую историю):\n"
+                f"{joined}\n"
+            )
+        except Exception:
+            aux_section = ""
+
     messages = [
         {
             "role": "system",
-            "content": "Переформулируй последний вопрос пользователя в самостоятельный, используя контекст истории диалога. Верни ТОЛЬКО переформулированный вопрос без дополнительного текста."
+            "content": (
+                "Переформулируй последний вопрос пользователя в самостоятельный, используя контекст истории ТЕКУЩЕЙ ветки. "
+                "Дополнительные сведения из других веток использовать только как справку при крайней необходимости. "
+                "Верни ТОЛЬКО переформулированный вопрос без дополнительного текста."
+            )
         },
         {
             "role": "user",
             "content": f"""История диалога:
 {history_text}
 
+{aux_section}
 Последний вопрос пользователя: {question}
 
 Переформулируй последний вопрос так, чтобы он был понятен без контекста истории. Ответь ТОЛЬКО переформулированным вопросом."""
@@ -288,6 +310,45 @@ def _condense_question_with_history(question: str, history_messages: List[Dict])
     condensed = _call_llm_chat(messages, temperature=0.1, max_tokens=200)
     logger.info(f"🔄 Query condensation: '{question}' → '{condensed}'")
     return condensed.strip()
+
+
+def _summarize_thread(messages: List[Dict], final_answer: str) -> str:
+    """Краткая суммаризация ветки (2–3 предложения или до 5 пунктов)."""
+    try:
+        parts = []
+        for m in messages[-10:]:
+            role = m.get("role", "user")
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            prefix = "П" if role == "user" else ("А" if role == "assistant" else "У")
+            parts.append(f"{prefix}: {content}")
+        parts_text = "\n".join(parts)
+
+        messages_llm = [
+            {
+                "role": "system",
+                "content": (
+                    "Суммаризируй ветку диалога для будущего вспомогательного контекста. "
+                    "Будь кратким: 2–3 предложения ИЛИ до 5 пунктов. Тема, ключевые факты, итог."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"""Диалог ветки (усечённо):
+{parts_text}
+
+Финальный ответ ассистента:
+{final_answer}
+
+Дай краткую суммаризацию ветки.""",
+            },
+        ]
+        summary = _call_llm_chat(messages_llm, temperature=0.1, max_tokens=220)
+        return (summary or "").strip()
+    except Exception as e:
+        logger.warning(f"Thread summarization failed: {e}")
+        return ""
 
 
 def _check_clarification_needed(question: str, history_messages: List[Dict], kb_context: Optional[str] = None) -> Dict[str, Any]:
@@ -1178,10 +1239,17 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     except Exception:
         pass
     
+    # Подготовим список вспомогательных суммаризаций прошлых веток (до 3 шт.)
+    aux_summaries: List[str] = []
+    try:
+        aux_summaries = await session.get_last_thread_summaries(limit=3, exclude_thread_id=thread_id)
+    except Exception:
+        aux_summaries = []
+
     # Подготовим вопрос для проверки (учитывая историю диалога), чтобы не делать двойную переформулировку
     query_for_check = req.query
     if not req.skip_clarification_check and not req.skip_condensation and len(history_messages) > 1:
-        query_for_check = _condense_question_with_history(req.query, history_messages)
+        query_for_check = _condense_question_with_history(req.query, history_messages, aux_summaries)
 
     # ===== ШАГ 1: Проверка на необходимость уточнений =====
     # Посчитаем текущий раунд уточнений по ветке
@@ -1274,7 +1342,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     already_condensed = (query_for_search != req.query)
     if not req.skip_condensation and len(history_messages) > 1 and not already_condensed:
         condensation_start = time.time()
-        query_for_search = _condense_question_with_history(req.query, history_messages)
+        query_for_search = _condense_question_with_history(req.query, history_messages, aux_summaries)
         condensation_time = time.time() - condensation_start
         
         metadata["steps"]["query_condensation"] = {
@@ -1497,6 +1565,18 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     generation_time = time.time() - generation_start
     
     await session.add_message("assistant", answer, metadata={"stage": "rag_answer", "thread_id": thread_id})
+    # Сохраняем суммаризацию для текущей ветки
+    try:
+        thread_msgs = await session.get_thread_messages(thread_id)
+        thread_summary = _summarize_thread(thread_msgs, answer)
+        if thread_summary:
+            await session.save_thread_summary(thread_id, thread_summary)
+            metadata["steps"]["thread_summary"] = {"saved": True, "length": len(thread_summary)}
+        else:
+            metadata["steps"]["thread_summary"] = {"saved": False, "reason": "empty"}
+    except Exception as e:
+        logger.warning(f"Failed to save thread summary (thread={thread_id}): {e}")
+        metadata["steps"]["thread_summary"] = {"saved": False, "error": str(e)}
     
     metadata["steps"]["generation"] = {
         "model": LLM_MODEL,

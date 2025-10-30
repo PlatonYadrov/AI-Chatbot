@@ -11,7 +11,7 @@ import uuid
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 
-from sqlalchemy import Column, String, Text, DateTime, BigInteger, ForeignKey, Index, select
+from sqlalchemy import Column, String, Text, DateTime, BigInteger, ForeignKey, Index, select, UniqueConstraint
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
@@ -71,6 +71,27 @@ class ChatMessageDB(Base):
     __table_args__ = (
         Index('idx_chat_messages_session_id', 'session_id'),
         Index('idx_chat_messages_created_at', 'created_at'),
+    )
+
+
+class ChatThreadSummaryDB(Base):
+    """SQLAlchemy модель для хранения суммаризаций по веткам (thread).
+
+    Уникальность определяется парой (session_id, thread_id).
+    """
+
+    __tablename__ = "chat_thread_summaries"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(BigInteger, ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
+    thread_id = Column(BigInteger, nullable=False)
+    summary = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('session_id', 'thread_id', name='uq_thread_summary_session_thread'),
+        Index('idx_thread_summaries_session', 'session_id'),
+        Index('idx_thread_summaries_created_at', 'created_at'),
     )
 
 
@@ -351,6 +372,70 @@ class ChatSession:
         parts = [f"- {q}: {a}" for q, a in self.clarifications.items()]
         return "\n".join(parts)
     
+    async def save_thread_summary(self, thread_id: int, summary: str) -> None:
+        """Сохранить/обновить суммаризацию для ветки.
+
+        Args:
+            thread_id: Идентификатор ветки (thread)
+            summary: Краткая суммаризация ветки
+        """
+        if self._db_session is None:
+            return
+        try:
+            res = await self._db_session.execute(
+                select(ChatThreadSummaryDB).filter(
+                    ChatThreadSummaryDB.session_id == self.session_id,
+                    ChatThreadSummaryDB.thread_id == int(thread_id)
+                )
+            )
+            row = res.scalar_one_or_none()
+            now = datetime.utcnow()
+            if row:
+                row.summary = summary
+                row.created_at = now
+            else:
+                row = ChatThreadSummaryDB(
+                    session_id=self.session_id,
+                    thread_id=int(thread_id),
+                    summary=summary,
+                    created_at=now
+                )
+                self._db_session.add(row)
+            await self._db_session.commit()
+        except Exception as e:
+            logger.error(f"Failed to save thread summary (session={self.session_id}, thread={thread_id}): {e}")
+            await self._db_session.rollback()
+
+    async def get_last_thread_summaries(self, limit: int = 3, exclude_thread_id: Optional[int] = None) -> List[str]:
+        """Получить последние N суммаризаций других веток текущей сессии.
+
+        Args:
+            limit: Максимальное число суммаризаций
+            exclude_thread_id: Исключить указанную ветку из выборки
+
+        Returns:
+            Список текстовых суммаризаций (не более limit)
+        """
+        if self._db_session is None:
+            return []
+        try:
+            q = select(ChatThreadSummaryDB).filter(
+                ChatThreadSummaryDB.session_id == self.session_id
+            ).order_by(ChatThreadSummaryDB.created_at.desc())
+            res = await self._db_session.execute(q)
+            rows = res.scalars().all()
+            out: List[str] = []
+            for r in rows:
+                if exclude_thread_id is not None and int(r.thread_id) == int(exclude_thread_id):
+                    continue
+                out.append(r.summary)
+                if len(out) >= int(limit):
+                    break
+            return out
+        except Exception as e:
+            logger.error(f"Failed to get thread summaries (session={self.session_id}): {e}")
+            return []
+
     def to_dict(self) -> Dict:
         """
         Сериализовать сессию в словарь.

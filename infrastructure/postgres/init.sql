@@ -34,6 +34,19 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session
 CREATE INDEX IF NOT EXISTS idx_chat_messages_created_at ON chat_messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(session_id, thread_id, created_at);
 
+-- Thread summaries: one row per (session_id, thread_id)
+CREATE TABLE IF NOT EXISTS chat_thread_summaries (
+    id BIGSERIAL PRIMARY KEY,
+    session_id BIGINT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    thread_id BIGINT NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    UNIQUE (session_id, thread_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_summaries_session ON chat_thread_summaries(session_id);
+CREATE INDEX IF NOT EXISTS idx_thread_summaries_created_at ON chat_thread_summaries(created_at);
+
 -- Trigger to auto-update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
