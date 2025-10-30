@@ -21,6 +21,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # Copy application code
 COPY . /app
 
+# Ensure static directory exists (for web UI)
+RUN mkdir -p /app/static
+
 EXPOSE 7000
 
 # Health check

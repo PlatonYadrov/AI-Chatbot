@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG Chat — минимальный UI</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <style>
+    :root { --bg:#0b0f14; --panel:#121821; --muted:#8aa0b5; --text:#e6edf3; --accent:#4ea1ff; --accent-2:#58d68d; --danger:#ff6b6b; --warning:#ffb86b; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Helvetica Neue", sans-serif; color:var(--text); background:linear-gradient(180deg, #0a0e13, #0b1118 80%); }
+    .app { display:grid; grid-template-columns: 280px 1fr; height:100vh; }
+    .sidebar { background:var(--panel); border-right:1px solid #243345; display:flex; flex-direction:column; }
+    .side-top { padding:12px; border-bottom:1px solid #243345; display:flex; gap:8px; align-items:center; }
+    .brand { font-weight:700; letter-spacing:0.3px; font-size:14px; opacity:0.9; }
+    .btn { background:#182231; color:var(--text); border:1px solid #2a3a52; border-radius:10px; padding:8px 10px; font-size:13px; cursor:pointer; }
+    .btn:hover { border-color:#3a5272; }
+    .btn.primary { background:#112037; border-color:#2b66a8; }
+    .btn.ghost { background:transparent; }
+    .btn.danger { border-color:#703a3a; color:#ffdcdc; }
+    .sessions { flex:1; overflow:auto; padding:8px; }
+    .session { display:flex; align-items:center; gap:8px; padding:8px; border:1px solid transparent; border-radius:12px; cursor:pointer; }
+    .session:hover { background:#0f1722; border-color:#243345; }
+    .session.active { background:#0e1a29; border-color:#2b66a8; }
+    .session-title { font-size:13px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; flex:1; }
+    .session-time { font-size:11px; color:var(--muted); }
+    .side-actions { padding:12px; border-top:1px solid #243345; display:flex; gap:8px; flex-wrap:wrap; }
+
+    .main { display:flex; flex-direction:column; min-width:0; }
+    .topbar { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid #243345; background:rgba(18,24,33,0.7); backdrop-filter: blur(6px); position:sticky; top:0; z-index:3; }
+    .title { font-weight:600; font-size:14px; }
+    .badge { font-size:11px; padding:2px 6px; border:1px solid #2a3a52; border-radius:999px; color:var(--muted); }
+
+    .alert { display:none; margin:8px 16px 0; padding:10px 12px; border:1px solid #5e3b21; background:#2b1a0f; color:#ffd9b0; border-radius:12px; font-size:13px; }
+    .alert.show { display:block; }
+
+    .chat { flex:1; overflow:auto; padding:20px; }
+    .bubble { max-width:820px; margin:0 auto 14px; padding:12px 14px; border:1px solid #233244; border-radius:14px; line-height:1.5; background:#0f1620; }
+    .bubble.assistant { background:#0e1a29; border-color:#2a3a52; }
+    .bubble .role { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin-bottom:6px; }
+    .bubble .content { white-space:pre-wrap; }
+
+    .composer { position:sticky; bottom:0; padding:12px 16px; background:linear-gradient(180deg, rgba(11,15,20,0), rgba(11,15,20,0.7) 30%, rgba(11,15,20,1) 55%); }
+    .composer-inner { max-width:860px; margin:0 auto; border:1px solid #233244; background:#0f1620; border-radius:16px; padding:10px; display:flex; gap:8px; }
+    textarea { flex:1; resize:vertical; min-height:42px; max-height:180px; border:none; outline:none; font:inherit; color:var(--text); background:transparent; }
+    .send { padding:10px 14px; border-radius:12px; border:1px solid #2b66a8; background:#10233a; color:#d6e8ff; cursor:pointer; }
+    .send:disabled { opacity:.6; cursor:not-allowed; }
+
+    .row { display:flex; gap:8px; align-items:center; }
+    .grow { flex:1; }
+    .muted { color:var(--muted); font-size:12px; }
+    .hidden { display:none; }
+    .spinner { width:16px; height:16px; border:2px solid #2a3a52; border-top-color:var(--accent); border-radius:50%; animation:spin .9s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+
+    dialog { border:1px solid #2a3a52; border-radius:14px; background:#0f1620; color:var(--text); padding:0; }
+    .dlg-head { padding:12px 14px; border-bottom:1px solid #243345; display:flex; align-items:center; justify-content:space-between; }
+    .dlg-body { padding:14px; }
+    .field { display:grid; gap:6px; margin-bottom:10px; }
+    input[type="text"], input[type="password"] { background:#0b131d; border:1px solid #233244; border-radius:10px; padding:10px; color:var(--text); }
+    .error { color:#ffb3b3; font-size:12px; }
+
+    .kbd { border:1px solid #243345; border-bottom-width:2px; border-radius:8px; padding:2px 6px; font-size:11px; color:var(--muted); }
+
+    /* Markdown styling */
+    .bubble .content h1, .bubble .content h2, .bubble .content h3 { margin:12px 0 8px 0; font-weight:600; line-height:1.3; }
+    .bubble .content h1 { font-size:20px; border-bottom:1px solid #243345; padding-bottom:6px; }
+    .bubble .content h2 { font-size:18px; }
+    .bubble .content h3 { font-size:16px; color:var(--accent); }
+    .bubble .content ul, .bubble .content ol { margin:8px 0; padding-left:24px; line-height:1.6; }
+    .bubble .content li { margin:4px 0; }
+    .bubble .content p { margin:8px 0; }
+    .bubble .content pre { background:#0b131d; border:1px solid #233244; border-radius:8px; padding:12px; overflow-x:auto; margin:10px 0; }
+    .bubble .content code { background:#0b131d; border:1px solid #1a2332; padding:2px 6px; border-radius:4px; font-family:'Courier New',monospace; font-size:13px; }
+    .bubble .content pre code { background:none; border:none; padding:0; }
+    .bubble .content strong { font-weight:600; color:#f0f6fc; }
+    .bubble .content em { font-style:italic; color:var(--muted); }
+    .bubble .content a { color:var(--accent); text-decoration:none; }
+    .bubble .content a:hover { text-decoration:underline; }
+    .bubble .content blockquote { border-left:3px solid var(--accent); padding-left:12px; margin:8px 0; color:var(--muted); font-style:italic; }
+    .bubble .content hr { border:none; border-top:1px solid #243345; margin:16px 0; }
+    .bubble .content table { border-collapse:collapse; width:100%; margin:10px 0; }
+    .bubble .content th, .bubble .content td { border:1px solid #233244; padding:8px; text-align:left; }
+    .bubble .content th { background:#0e1a29; font-weight:600; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="side-top">
+        <div class="brand">RAG Chat</div>
+        <button class="btn primary" id="newChatBtn" type="button">+ Новый</button>
+        <button class="btn ghost" id="settingsBtn" type="button">Настройки</button>
+      </div>
+      <div class="sessions" id="sessions"></div>
+      <div class="side-actions">
+        <button class="btn" id="exportBtn" type="button">Экспорт</button>
+        <button class="btn danger" id="clearAllBtn" type="button">Очистить всё</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div class="title" id="sessionTitle">Новый диалог</div>
+        <span class="badge" id="sessionInfo">localStorage</span>
+        <span class="badge" id="sessionBadge">Session: —</span>
+        <span class="badge" id="endpointStatus">Endpoint: —</span>
+        <span class="muted">Отправить — <span class="kbd">Ctrl/⌘+Enter</span></span>
+      </div>
+
+      <div id="alert" class="alert"></div>
+
+      <div class="chat" id="chat"></div>
+      <div class="composer">
+        <div class="composer-inner">
+          <textarea id="input" placeholder="Задайте вопрос по внутренней документации..."></textarea>
+          <button class="send" id="sendBtn" type="button">Отправить</button>
+        </div>
+        <div class="row" style="max-width:860px;margin:6px auto 0;">
+          <span class="muted">Подсказка: начните с контекста (проекта, команды, сервиса), чтобы улучшить RAG-поиск.</span>
+          <span id="loading" class="row hidden" style="margin-left:auto;gap:6px"><span class="spinner"></span><span class="muted">Генерация ответа...</span></span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Настройки -->
+  <dialog id="settingsDlg">
+    <div class="dlg-head">
+      <strong>Настройки подключения</strong>
+      <button class="btn ghost" id="settingsCloseBtn" type="button">Закрыть</button>
+    </div>
+    <div class="dlg-body">
+      <div class="field">
+        <label>Endpoint URL</label>
+        <input type="text" id="endpoint" placeholder="http://10.99.35.90:7000/chat/conversational" />
+        <div id="endpointError" class="error hidden">Укажите корректный URL (http/https).</div>
+      </div>
+      <div class="field">
+        <label>API Key (опционально)</label>
+        <input type="password" id="apikey" placeholder="секретный ключ" />
+      </div>
+      <div class="field">
+        <label class="row" style="gap:8px;align-items:center">
+          <input type="checkbox" id="sessionNameOverride" /> Указать session_name вручную
+        </label>
+        <input type="text" id="sessionName" placeholder="например, query6.2" disabled />
+        <div class="muted">По умолчанию используется <b>id текущего диалога</b>. Переключая диалоги, вы автоматически получаете новое <code>session_name</code>.</div>
+      </div>
+
+      <div class="row" style="gap:12px;flex-wrap:wrap;margin:14px 0 6px">
+        <div class="field" style="min-width:160px">
+          <label>k</label>
+          <input type="text" id="k" placeholder="5" />
+        </div>
+        <div class="field" style="min-width:220px">
+          <label>max_clarification_rounds</label>
+          <input type="text" id="maxClarificationRounds" placeholder="2" />
+        </div>
+        <div class="field" style="min-width:220px">
+          <label>rerank_top_k</label>
+          <input type="text" id="rerankTopK" placeholder="0" />
+        </div>
+      </div>
+      <div class="row" style="gap:16px;flex-wrap:wrap;margin-bottom:10px">
+        <label class="row" style="gap:8px"><input type="checkbox" id="useReranking" checked /> use_reranking</label>
+        <label class="row" style="gap:8px"><input type="checkbox" id="skipCondensation" /> skip_condensation</label>
+        <label class="row" style="gap:8px"><input type="checkbox" id="skipClarificationCheck" /> skip_clarification_check</label>
+      </div>
+
+      <div class="row">
+        <button class="btn primary" id="saveSettingsBtn" type="button">Сохранить</button>
+        <span class="muted">Параметры сохраняются локально в браузере.</span>
+      </div>
+    </div>
+  </dialog>
+
+  <script>
+    // === Утилиты ===
+    const storeKey = 'rag-chat-sessions-v1';
+    const settingsKey = 'rag-chat-settings-v1';
+    const nanoid = (t=21)=>{let e="",n=crypto.getRandomValues(new Uint8Array(t));for(let r=0;r<t;r++){let a=n[r]&63;e+=a<36?a.toString(36):a<62?(a-26).toString(36).toUpperCase():a<63?"_":"-"}return e};
+    const fmtTime = (d)=> new Date(d).toLocaleString();
+    const on = (el, evt, fn)=>{ if(!el){ console.error('UI: missing element for', evt); return; } el.addEventListener(evt, fn); };
+    const byId = (id)=>document.getElementById(id);
+    const isValidUrl = (u)=>{
+      try { const x = new URL(u); return x.protocol==='http:' || x.protocol==='https:'; } catch { return false; }
+    };
+
+    function showAlert(text){
+      const a = byId('alert');
+      a.textContent = text;
+      a.classList.add('show');
+      // авто-скрытие через 4s
+      clearTimeout(showAlert._t); showAlert._t = setTimeout(()=>a.classList.remove('show'), 4000);
+    }
+
+    // === Хранилище ===
+    function loadSessions(){ try { return JSON.parse(localStorage.getItem(storeKey) || '[]'); } catch { return []; } }
+    function saveSessions(sessions){ localStorage.setItem(storeKey, JSON.stringify(sessions)); }
+    function loadSettings(){ try { return JSON.parse(localStorage.getItem(settingsKey) || '{}'); } catch { return {}; } }
+    function saveSettings(s){ localStorage.setItem(settingsKey, JSON.stringify(s)); }
+
+    // === Состояние ===
+    let sessions = loadSessions();
+    let activeId = sessions[0]?.id || null;
+    let settings = loadSettings();
+
+    // === Элементы ===
+    const chatEl = byId('chat');
+    const sessionsEl = byId('sessions');
+    const inputEl = byId('input');
+    const sendBtn = byId('sendBtn');
+    const loadingEl = byId('loading');
+    const titleEl = byId('sessionTitle');
+    const infoEl = byId('sessionInfo');
+    const endpointStatusEl = byId('endpointStatus');
+
+    const newChatBtn = byId('newChatBtn');
+    const settingsBtn = byId('settingsBtn');
+    const exportBtn = byId('exportBtn');
+    const clearAllBtn = byId('clearAllBtn');
+
+    const settingsDlg = byId('settingsDlg');
+    const settingsCloseBtn = byId('settingsCloseBtn');
+    const endpointInput = byId('endpoint');
+    const endpointError = byId('endpointError');
+    const apikeyInput = byId('apikey');
+    const sessionNameInput = byId('sessionName');
+    const sessionNameOverrideInput = byId('sessionNameOverride');
+    const kInput = byId('k');
+    const maxClarificationRoundsInput = byId('maxClarificationRounds');
+    const rerankTopKInput = byId('rerankTopK');
+    const useRerankingInput = byId('useReranking');
+    const skipCondensationInput = byId('skipCondensation');
+    const skipClarificationCheckInput = byId('skipClarificationCheck');
+    const saveSettingsBtn = byId('saveSettingsBtn');
+
+    // === Вспомогательные ===
+    function endpointReady(){ return !!settings.endpoint && isValidUrl(settings.endpoint); }
+    function updateEndpointUI(){
+      if (endpointReady()){
+        endpointStatusEl.textContent = 'Endpoint: OK';
+        endpointStatusEl.style.borderColor = '#2a3a52';
+        sendBtn.disabled = false;
+      } else {
+        endpointStatusEl.textContent = 'Endpoint: ⚠ не задан/некорректен';
+        endpointStatusEl.style.borderColor = '#703a3a';
+        sendBtn.disabled = true;
+      }
+    }
+
+    // === Рендер ===
+    function renderSessions(){
+      sessionsEl.innerHTML = '';
+      sessions.forEach(s => {
+        const row = document.createElement('div');
+        row.className = 'session' + (s.id === activeId ? ' active' : '');
+        row.onclick = () => { activeId = s.id; render(); };
+
+        const title = document.createElement('div');
+        title.className = 'session-title';
+        title.textContent = s.title || 'Без названия';
+
+        const time = document.createElement('div');
+        time.className = 'session-time';
+        time.textContent = fmtTime(s.updatedAt || s.createdAt);
+
+        const rename = document.createElement('button');
+        rename.className = 'btn ghost';
+        rename.textContent = 'Переимен.';
+        rename.onclick = (e)=>{ e.stopPropagation(); const name = prompt('Новое имя сессии', s.title || ''); if(name!==null){ s.title = name.trim(); s.updatedAt = Date.now(); saveSessions(sessions); render(); }};
+
+        const del = document.createElement('button');
+        del.className = 'btn ghost';
+        del.textContent = '✕';
+        del.onclick = (e)=>{ e.stopPropagation(); if(confirm('Удалить диалог?')){ sessions = sessions.filter(x=>x.id!==s.id); if(activeId===s.id) activeId = sessions[0]?.id || null; saveSessions(sessions); render(); } };
+
+        row.appendChild(title);
+        row.appendChild(time);
+        row.appendChild(rename);
+        row.appendChild(del);
+        sessionsEl.appendChild(row);
+      });
+    }
+
+    function renderChat(){
+      chatEl.innerHTML='';
+      const s = sessions.find(x=>x.id===activeId);
+      if(!s){
+        const empty = document.createElement('div');
+        empty.className='muted';
+        empty.style.margin='30px auto';
+        empty.style.maxWidth='760px';
+        empty.textContent='Нет выбранного диалога. Создайте новый.';
+        chatEl.appendChild(empty);
+        titleEl.textContent = 'Новый диалог';
+        return;
+      }
+      titleEl.textContent = s.title || 'Новый диалог';
+      s.messages.forEach(m => {
+        const b = document.createElement('div');
+        b.className = 'bubble ' + (m.role==='assistant'?'assistant':'');
+        const r = document.createElement('div'); r.className='role'; r.textContent = m.role==='user'?'Вы':'Бот';
+        const c = document.createElement('div'); c.className='content';
+        
+        // Используем marked для ассистента, plain text для пользователя
+        if (m.role === 'assistant' && typeof marked !== 'undefined') {
+          try {
+            c.innerHTML = marked.parse(m.content);
+          } catch(e) {
+            console.warn('Markdown parse error:', e);
+            c.textContent = m.content;
+          }
+        } else {
+          c.textContent = m.content;
+        }
+        
+        b.appendChild(r); b.appendChild(c);
+        chatEl.appendChild(b);
+      });
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function currentSession(){ return sessions.find(x=>x.id===activeId) || null; }
+    function resolvedSessionName(){
+      const s = currentSession();
+      if(!s) return '';
+      return (settings.sessionNameOverride && settings.sessionName?.trim()) ? settings.sessionName.trim() : s.id;
+    }
+    function render(){
+      renderSessions();
+      renderChat();
+      infoEl.textContent = 'localStorage';
+      updateEndpointUI();
+      const name = resolvedSessionName() || '—';
+      byId('sessionBadge').textContent = 'Session: ' + name;
+    }
+
+    // === Действия ===
+    function newChat(){
+      const id = nanoid(10);
+      const now = Date.now();
+      const s = { id, title: 'Новый диалог', createdAt: now, updatedAt: now, messages: [] };
+      sessions.unshift(s);
+      activeId = id;
+      saveSessions(sessions);
+      render();
+      inputEl?.focus();
+    }
+
+    function ensureEndpointOrAsk(){
+      settings = loadSettings();
+      if (endpointReady()) return true;
+      // показать настройки + подсветить ошибку
+      endpointInput.value = settings.endpoint || '';
+      endpointError.classList.remove('hidden');
+      settingsDlg.showModal();
+      endpointInput.focus();
+      showAlert('Укажите Endpoint URL в настройках.');
+      return false;
+    }
+
+    async function sendMessage(){
+      const text = (inputEl.value||'').trim();
+      if(!text) return;
+      if(!ensureEndpointOrAsk()) return;
+
+      if(!activeId) newChat();
+      const s = sessions.find(x=>x.id===activeId);
+      s.messages.push({ role:'user', content:text, ts: Date.now() });
+      s.updatedAt = Date.now();
+      saveSessions(sessions);
+      inputEl.value='';
+      render();
+      
+      // Добавляем временное сообщение "печатает..."
+      const tempId = Date.now();
+      s.messages.push({ 
+        role:'assistant', 
+        content:'⏳ Генерирую ответ...', 
+        ts: tempId, 
+        temp: true 
+      });
+      render();
+      loadingEl.classList.remove('hidden');
+
+      try {
+        const { endpoint, apikey } = loadSettings();
+
+        const payload = {
+          query: text,
+          session_name: (settings.sessionNameOverride && settings.sessionName?.trim()) || s.id,
+          k: Number(settings.k ?? 5),
+          max_clarification_rounds: Number(settings.maxClarificationRounds ?? 2),
+          use_reranking: Boolean(settings.useReranking ?? true),
+          rerank_top_k: Number(settings.rerankTopK ?? 0),
+          skip_condensation: Boolean(settings.skipCondensation ?? false),
+          skip_clarification_check: Boolean(settings.skipClarificationCheck ?? false),
+        };
+
+        // pretty=true для получения красиво отформатированного текста
+        const url = new URL(endpoint);
+        url.searchParams.set('pretty', 'true');
+
+        const res = await fetch(url.toString(), {
+          method: 'POST',
+          headers: {
+            'Accept': 'text/plain, application/json',
+            'Content-Type': 'application/json',
+            ...(apikey ? { 'Authorization': `Bearer ${apikey}` } : {})
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if(!res.ok) throw new Error(`Backend error: ${res.status} ${res.statusText}`);
+
+        // Удаляем временное сообщение
+        s.messages = s.messages.filter(m => !m.temp);
+
+        const responseText = await res.text();
+        
+        // Парсим формат от _format_qna:
+        // Формат 1 (уточнение): просто текст вопроса
+        // Формат 2 (ответ): "вопрос\n\n- ответ\n\nисточники: док1, док2"
+        
+        let answer;
+        
+        // Проверяем является ли это форматом _format_qna (содержит "\n\n- ")
+        if (responseText.includes('\n\n- ')) {
+          // Это полный ответ в формате _format_qna
+          const parts = responseText.split('\n\n');
+          
+          // Пропускаем первую строку (повтор вопроса)
+          let answerLines = [];
+          let sourcesLine = '';
+          
+          for (let i = 1; i < parts.length; i++) {
+            const part = parts[i];
+            if (part.startsWith('источники: ')) {
+              sourcesLine = part;
+            } else if (part.startsWith('- ')) {
+              // Убираем "- " в начале ответа
+              answerLines.push(part.substring(2));
+            } else if (part.trim()) {
+              answerLines.push(part);
+            }
+          }
+          
+          answer = answerLines.join('\n\n');
+          
+          // Добавляем источники с красивым форматированием
+          if (sourcesLine) {
+            const sources = sourcesLine.replace('источники: ', '').split(', ');
+            const formattedSources = sources
+              .map((src, i) => `[${i+1}] ${src}`)
+              .join('\n');
+            answer += `\n\n📚 **Источники:**\n${formattedSources}`;
+          }
+        } else {
+          // Это либо уточняющий вопрос, либо простой ответ
+          // Если текст короткий и выглядит как вопрос - добавляем эмодзи
+          if (responseText.length < 500 && (
+              responseText.includes('?') || 
+              responseText.toLowerCase().includes('уточ') ||
+              responseText.toLowerCase().includes('какой') ||
+              responseText.toLowerCase().includes('какая') ||
+              responseText.toLowerCase().includes('какое')
+          )) {
+            answer = `❓ **Уточняющий вопрос:**\n\n${responseText}`;
+          } else {
+            answer = responseText;
+          }
+        }
+        
+        s.messages.push({ role:'assistant', content: answer, ts: Date.now() });
+        s.updatedAt = Date.now();
+        saveSessions(sessions);
+        render();
+        
+      } catch(err){
+        console.error('RAG Request Error:', err);
+        
+        // Удаляем временное сообщение если оно еще есть
+        const s = sessions.find(x=>x.id===activeId);
+        s.messages = s.messages.filter(m => !m.temp);
+        
+        let errorMsg = `❌ **Ошибка соединения**\n\n${err.message}`;
+        
+        // Детализация типичных ошибок
+        if (err.message.includes('Failed to fetch')) {
+          errorMsg += '\n\n💡 **Возможные причины:**\n';
+          errorMsg += '• Проверьте Endpoint URL в настройках\n';
+          errorMsg += '• Убедитесь что CORS настроен на сервере\n';
+          errorMsg += '• Проверьте доступность backend\n';
+          errorMsg += `• Текущий endpoint: ${settings.endpoint || 'не задан'}`;
+        } else if (err.message.includes('Backend error: 422')) {
+          errorMsg += '\n\n💡 Неверный формат запроса. Проверьте параметры в настройках.';
+        } else if (err.message.includes('Backend error: 500')) {
+          errorMsg += '\n\n💡 Внутренняя ошибка сервера. Проверьте логи backend.';
+        } else if (err.message.includes('Backend error: 404')) {
+          errorMsg += '\n\n💡 Endpoint не найден. Проверьте URL.';
+        }
+        
+        s.messages.push({ role:'assistant', content: errorMsg, ts: Date.now() });
+        s.updatedAt = Date.now();
+        saveSessions(sessions);
+        render();
+      } finally {
+        loadingEl.classList.add('hidden');
+      }
+    }
+
+    // === Экспорт/Импорт ===
+    function exportAll(){
+      const blob = new Blob([JSON.stringify({ sessions, settings }, null, 2)], { type:'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `rag-chat-export-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function clearAll(){
+      if(confirm('Это удалит ВСЕ локальные диалоги. Продолжить?')){
+        sessions = []; activeId = null; saveSessions(sessions); render();
+      }
+    }
+
+    // === События ===
+    on(newChatBtn, 'click', newChat);
+    on(sendBtn, 'click', sendMessage);
+    on(inputEl, 'keydown', (e)=>{ if((e.ctrlKey || e.metaKey) && e.key==='Enter'){ sendMessage(); } });
+    on(exportBtn, 'click', exportAll);
+    on(clearAllBtn, 'click', clearAll);
+
+    on(settingsBtn, 'click', ()=>{
+      endpointInput.value = settings.endpoint || '';
+      apikeyInput.value = settings.apikey || '';
+      sessionNameOverrideInput.checked = !!settings.sessionNameOverride;
+      sessionNameInput.disabled = !sessionNameOverrideInput.checked;
+      sessionNameInput.value = settings.sessionName || '';
+      kInput.value = settings.k ?? '5';
+      maxClarificationRoundsInput.value = settings.maxClarificationRounds ?? '2';
+      rerankTopKInput.value = settings.rerankTopK ?? '0';
+      useRerankingInput.checked = (settings.useReranking ?? true);
+      skipCondensationInput.checked = (settings.skipCondensation ?? false);
+      skipClarificationCheckInput.checked = (settings.skipClarificationCheck ?? false);
+      endpointError.classList.add('hidden');
+      settingsDlg.showModal();
+    });
+
+    on(settingsCloseBtn, 'click', ()=> settingsDlg.close());
+    on(sessionNameOverrideInput, 'change', ()=>{ sessionNameInput.disabled = !sessionNameOverrideInput.checked; });
+
+    on(saveSettingsBtn, 'click', ()=>{
+      const ep = endpointInput.value.trim();
+      const ok = isValidUrl(ep);
+      if(!ok){ endpointError.classList.remove('hidden'); endpointInput.focus(); return; }
+      endpointError.classList.add('hidden');
+
+      settings = {
+        endpoint: ep,
+        apikey: apikeyInput.value.trim(),
+        sessionNameOverride: !!sessionNameOverrideInput.checked,
+        sessionName: sessionNameOverrideInput.checked ? sessionNameInput.value.trim() : '',
+        k: kInput.value.trim(),
+        maxClarificationRounds: maxClarificationRoundsInput.value.trim(),
+        rerankTopK: rerankTopKInput.value.trim(),
+        useReranking: useRerankingInput.checked,
+        skipCondensation: skipCondensationInput.checked,
+        skipClarificationCheck: skipClarificationCheckInput.checked,
+      };
+      saveSettings(settings);
+      updateEndpointUI();
+      settingsDlg.close();
+      showAlert('Настройки сохранены.');
+      render();
+    });
+
+    // === Инициализация ===
+    if(!activeId) newChat();
+    render();
+
+    // === Самопроверки (включаются при #test в URL) ===
+    function runSelfTests(){
+      const requiredIds = ['newChatBtn','settingsBtn','sessions','exportBtn','clearAllBtn','chat','input','sendBtn','loading','settingsDlg','endpoint','apikey','sessionName','k','maxClarificationRounds','rerankTopK','useReranking','skipCondensation','skipClarificationCheck','saveSettingsBtn','settingsCloseBtn','endpointStatus','alert','sessionBadge','sessionNameOverride'];
+      const missing = requiredIds.filter(id => !byId(id));
+      console.assert(missing.length === 0, 'Отсутствуют элементы:', missing);
+
+      // Тест 1: создание диалога
+      const prevCount = sessions.length;
+      newChat();
+      console.assert(sessions.length === prevCount + 1, 'Новый диалог не добавлен');
+
+      // Тест 2: сохранение валидных настроек (без override session_name)
+      settingsDlg.close();
+      endpointInput.value = 'http://example.com/chat';
+      sessionNameOverrideInput.checked = false;
+      sessionNameInput.value = 'ignored-if-override-off';
+      kInput.value = '5';
+      saveSettingsBtn.click();
+      const s1 = loadSettings();
+      console.assert(s1.endpoint === 'http://example.com/chat' && !s1.sessionNameOverride, 'Настройки/override сохранены неверно');
+      console.assert(sendBtn.disabled === false, 'Send должен быть активен при валидном endpoint');
+
+      // Тест 3: session_name по умолчанию = id активного диалога
+      const active = sessions.find(x=>x.id===activeId);
+      console.assert(byId('sessionBadge').textContent.includes(active.id), 'Badge должен показывать id диалога как session_name');
+
+      // Тест 4: включаем override и задаём кастомное имя
+      settingsBtn.click();
+      sessionNameOverrideInput.checked = true;
+      sessionNameInput.disabled = false;
+      sessionNameInput.value = 'manual-name-123';
+      saveSettingsBtn.click();
+      console.assert(loadSettings().sessionName === 'manual-name-123', 'manual session_name не сохранился');
+
+      // Тест 5: при создании нового диалога без override должен отображаться новый id
+      settings.sessionNameOverride = false; saveSettings(settings);
+      const oldBadge = byId('sessionBadge').textContent;
+      newChat();
+      const newId = sessions.find(x=>x.id===activeId).id;
+      render();
+      console.assert(byId('sessionBadge').textContent.includes(newId) && !byId('sessionBadge').textContent.includes('manual-name-123'), 'Badge должен отражать новый id для нового диалога');
+
+      // Тест 6: блокировка отправки при пустом endpoint и автопоказ настроек
+      localStorage.setItem(settingsKey, JSON.stringify({ ...s1, endpoint: '' }));
+      settings = loadSettings();
+      render();
+      const msgBefore = sessions.find(x=>x.id===activeId).messages.length;
+      inputEl.value = 'ping';
+      sendBtn.click();
+      const msgAfter = sessions.find(x=>x.id===activeId).messages.length;
+      console.assert(msgAfter === msgBefore, 'Сообщение не должно отправляться без endpoint');
+      console.assert(settingsDlg.open === true, 'Диалог настроек должен открыться при отсутствии endpoint');
+
+      console.log('%cSelf-tests passed (UI)', 'color: #58d68d');
+    }
+    if (location.hash.includes('test')) runSelfTests();
+  </script>
+</body>
+</html>

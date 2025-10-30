@@ -8,7 +8,9 @@ import re
 from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
@@ -197,6 +199,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAG Gateway", lifespan=lifespan)
+
+# Configure CORS для работы с веб-интерфейсом
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # В продакшене укажите конкретные домены
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ==================== Conversational RAG Pipeline ====================
 # Зачем: Полноценный диалоговый пайплайн с query condensation и автоматическими уточнениями
@@ -1755,3 +1766,27 @@ def health_check():
         health_status["components"]["hybrid_search"] = {"status": "not_imported"}
     
     return health_status
+
+
+# ==================== Web UI Endpoints ====================
+
+@app.get("/", response_class=FileResponse)
+async def serve_ui():
+    """
+    Serve the web UI for chatting with the RAG system.
+    
+    Returns:
+        HTML file with the chat interface
+    """
+    static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+    index_path = os.path.join(static_dir, "index.html")
+    
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="text/html")
+    else:
+        # Fallback message if UI is not found
+        return PlainTextResponse(
+            "RAG Chat UI not found. "
+            "Please ensure static/index.html exists in the services/online-rag directory.",
+            status_code=404
+        )
