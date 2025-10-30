@@ -1528,38 +1528,13 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
         "generation": metadata["steps"]["generation"]["time_ms"]
     }
 
-    # Соберём плоский список источников для красивого вывода (как в /chat)
-    sourses = []
-    for d in docs:
-        meta = getattr(d, 'metadata', {}) or {}
-        text_content = getattr(d, 'page_content', '')
-        raw_path = (
-            meta.get('path')
-            or meta.get('source_path')
-            or meta.get('source_uri')
-            or meta.get('source')
-            or ''
-        )
-        try:
-            document_name = os.path.basename(str(raw_path)) if raw_path else ''
-        except Exception:
-            document_name = ''
-        if not document_name:
-            document_name = str(meta.get('doc_id') or 'unknown')
-        source_path = raw_path or ''
-        sourses.append({
-            'text': text_content,
-            'document': document_name,
-            'path': source_path
-        })
-
     if pretty:
-        # Для красивого вывода убираем внутренние размышления
+        # Для красивого вывода: использовать тот же сгенерированный ответ, только убрать <think>…</think>
         try:
             cleaned_answer = re.sub(r"<think>.*?</think>\s*", "", answer, flags=re.S).strip()
         except Exception:
             cleaned_answer = answer
-        return PlainTextResponse(_format_qna(req.query, cleaned_answer, sourses))
+        return PlainTextResponse(cleaned_answer)
     
     return ConversationalResponse(
         session_id=session.session_id,
