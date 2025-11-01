@@ -154,6 +154,31 @@ services:
               device_ids: ['1']  # Embeddings on GPU 1 (~2GB VRAM)
               capabilities: [gpu]
 
+  confluence_sync:
+    build:
+      context: .
+      dockerfile: ./services/confluence-sync/Dockerfile
+    environment:
+      # Confluence
+      - HOST=https://wiki.hg.loc
+      - PAGE_ID=51828096
+      - TOKEN=${TOKEN}
+      - VERIFY_SSL=false
+
+      # Ingestion API (внутренняя сеть compose)
+      - INGEST_URL=http://ingestion:6000/ingest
+
+      # Postgres (async SQLAlchemy/asyncpg)
+      - DATABASE_URL=postgresql+asyncpg://rag_user:rag_password@postgres:5432/rag_chatbot
+
+      # Логирование и таймзона для cron
+      - LOG_LEVEL=INFO
+      - TZ=Europe/Moscow
+    depends_on:
+      - ingestion
+      - postgres
+    restart: unless-stopped
+
 volumes:
   hf_cache:
   rag_data:
