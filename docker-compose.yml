@@ -46,7 +46,9 @@ services:
     volumes:
       - rag_data:/data
     depends_on:
-      - llm
+      - llm_tpro
+      - llm_qwen7b
+      - llm_gemma
       - qdrant
       - reranker
       - postgres
@@ -104,25 +106,28 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-  llm:
+  # ============= LLM Models (3 модели на выбор) =============
+  
+  # 1. T-Pro IT 2.0 (Qwen3 32B AWQ) - основная модель для IT-документации
+  llm_tpro:
     image: vllm/vllm-openai:v0.10.0
+    container_name: llm_tpro
     environment:
       - VLLM_USE_V1=0
-      - CUDA_VISIBLE_DEVICES=0,1
+      - CUDA_VISIBLE_DEVICES=0
     command: >-
       --model t-tech/T-pro-it-2.0-AWQ
-      --tensor-parallel-size 2
+      --quantization awq
+      --tensor-parallel-size 1
       --dtype half
-      --max-model-len 32768
+      --max-model-len 16384
       --disable-log-requests
-      --no-enable-prefix-caching
       --download-dir /root/.cache
-      --max-num-seqs 8
-      --max-num-batched-tokens 33000
-      --gpu-memory-utilization 0.80
+      --max-num-seqs 4
+      --gpu-memory-utilization 0.75
     ports:
       - "0.0.0.0:8000:8000"
-    shm_size: 32g
+    shm_size: 18g
     ipc: host
     volumes:
       - /mnt/hf_cache:/root/.cache
@@ -131,7 +136,68 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0', '1']  # vLLM on both L4 GPUs
+              device_ids: ['0']
+              capabilities: [gpu]
+  
+  # 2. Qwen 2.5 7B - быстрая универсальная модель
+  llm_qwen7b:
+    image: vllm/vllm-openai:v0.10.0
+    container_name: llm_qwen7b
+    environment:
+      - VLLM_USE_V1=0
+      - CUDA_VISIBLE_DEVICES=0
+    command: >-
+      --model Qwen/Qwen2.5-7B-Instruct-AWQ
+      --quantization awq
+      --tensor-parallel-size 1
+      --dtype half
+      --max-model-len 8192
+      --disable-log-requests
+      --download-dir /root/.cache
+      --max-num-seqs 6
+      --gpu-memory-utilization 0.20
+    ports:
+      - "0.0.0.0:8001:8000"
+    shm_size: 6g
+    ipc: host
+    volumes:
+      - /mnt/hf_cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+  
+  # 3. Gemma 2 9B - качественная модель от Google
+  llm_gemma:
+    image: vllm/vllm-openai:v0.10.0
+    container_name: llm_gemma
+    environment:
+      - VLLM_USE_V1=0
+      - CUDA_VISIBLE_DEVICES=1
+    command: >-
+      --model google/gemma-2-9b-it
+      --tensor-parallel-size 1
+      --dtype half
+      --max-model-len 8192
+      --disable-log-requests
+      --download-dir /root/.cache
+      --max-num-seqs 4
+      --gpu-memory-utilization 0.32
+    ports:
+      - "0.0.0.0:8002:8000"
+    shm_size: 8g
+    ipc: host
+    volumes:
+      - /mnt/hf_cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
               capabilities: [gpu]
   embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:cuda-sha-a593f66

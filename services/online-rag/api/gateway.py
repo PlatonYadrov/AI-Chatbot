@@ -212,13 +212,85 @@ app.add_middleware(
 # ==================== Conversational RAG Pipeline ====================
 # Зачем: Полноценный диалоговый пайплайн с query condensation и автоматическими уточнениями
 
-# Initialize OpenAI client for vLLM
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llm:8000/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-14B-Instruct-AWQ")
-llm_client = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
+# Конфигурация доступных LLM моделей
+LLM_MODELS = {
+    "t-tech/T-pro-it-2.0-AWQ": {
+        "base_url": "http://llm_tpro:8000/v1",
+        "name": "T-Pro IT 2.0",
+        "size": "32B",
+        "emoji": "🎯",
+        "description": "IT-документация (Qwen3 32B)",
+        "speed": "средняя",
+        "quality": "отличная"
+    },
+    "Qwen/Qwen2.5-7B-Instruct-AWQ": {
+        "base_url": "http://llm_qwen7b:8000/v1",
+        "name": "Qwen 2.5 7B",
+        "size": "7B",
+        "emoji": "⚡",
+        "description": "Быстрая универсальная",
+        "speed": "очень быстрая",
+        "quality": "хорошая"
+    },
+    "google/gemma-2-9b-it": {
+        "base_url": "http://llm_gemma:8000/v1",
+        "name": "Gemma 2",
+        "size": "9B",
+        "emoji": "🚀",
+        "description": "От Google",
+        "speed": "быстрая",
+        "quality": "высокая"
+    }
+}
+
+# Модель по умолчанию (первая в списке)
+DEFAULT_MODEL_ID = "t-tech/T-pro-it-2.0-AWQ"
+
+# Legacy поддержка для старых переменных окружения
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", LLM_MODELS[DEFAULT_MODEL_ID]["base_url"])
+LLM_MODEL = os.getenv("LLM_MODEL", DEFAULT_MODEL_ID)
+
+# Создаем словарь клиентов для всех моделей
+llm_clients = {}
+for model_id, config in LLM_MODELS.items():
+    try:
+        llm_clients[model_id] = OpenAI(base_url=config["base_url"], api_key="not-needed")
+        logger.info(f"✅ LLM client initialized: {config['name']} ({model_id}) at {config['base_url']}")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize LLM client for {model_id}: {e}")
+
+# Legacy клиент для обратной совместимости
+llm_client = llm_clients.get(DEFAULT_MODEL_ID) if llm_clients else OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
 
 
-def _call_llm_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max_tokens: int = 8000) -> str:
+def get_llm_client_for_model(model_id: Optional[str] = None) -> tuple[OpenAI, str]:
+    """
+    Возвращает OpenAI клиент и имя модели для указанного model_id.
+    
+    Args:
+        model_id: ID модели из LLM_MODELS (например, "t-tech/T-pro-it-2.0-AWQ")
+    
+    Returns:
+        Tuple (OpenAI клиент, имя модели)
+    """
+    if not model_id or model_id not in LLM_MODELS:
+        model_id = DEFAULT_MODEL_ID
+    
+    client = llm_clients.get(model_id)
+    if not client:
+        logger.warning(f"⚠️  Client for model {model_id} not found, using default")
+        client = llm_client
+        model_id = DEFAULT_MODEL_ID
+    
+    return client, model_id
+
+
+def _call_llm_chat(
+    messages: List[Dict[str, str]], 
+    temperature: float = 0.2, 
+    max_tokens: int = 8000,
+    model_id: Optional[str] = None
+) -> str:
     """
     Вызов LLM через OpenAI-совместимый API.
     
@@ -226,13 +298,15 @@ def _call_llm_chat(messages: List[Dict[str, str]], temperature: float = 0.2, max
         messages: Список сообщений в формате [{"role": "system|user|assistant", "content": "..."}]
         temperature: Температура генерации
         max_tokens: Максимальное количество токенов
+        model_id: ID модели для использования (если не указан, используется DEFAULT_MODEL_ID)
     
     Returns:
         Ответ LLM
     """
     try:
-        response = llm_client.chat.completions.create(
-            model=LLM_MODEL,
+        client, actual_model_id = get_llm_client_for_model(model_id)
+        response = client.chat.completions.create(
+            model=actual_model_id,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -247,6 +321,7 @@ def _condense_question_with_history(
     question: str,
     history_messages: List[Dict],
     aux_summaries: Optional[List[str]] = None,
+    model_id: Optional[str] = None,
 ) -> str:
     """
     Переформулирует вопрос пользователя в самостоятельный с учетом истории диалога.
@@ -309,12 +384,12 @@ def _condense_question_with_history(
         }
     ]
     
-    condensed = _call_llm_chat(messages, temperature=0.1, max_tokens=200)
+    condensed = _call_llm_chat(messages, temperature=0.1, max_tokens=200, model_id=model_id)
     logger.info(f"🔄 Query condensation: '{question}' → '{condensed}'")
     return condensed.strip()
 
 
-def _summarize_thread(messages: List[Dict], final_answer: str) -> str:
+def _summarize_thread(messages: List[Dict], final_answer: str, model_id: Optional[str] = None) -> str:
     """Краткая суммаризация ветки (2–3 предложения или до 5 пунктов)."""
     try:
         parts = []
@@ -346,14 +421,19 @@ def _summarize_thread(messages: List[Dict], final_answer: str) -> str:
 Дай краткую суммаризацию ветки.""",
             },
         ]
-        summary = _call_llm_chat(messages_llm, temperature=0.1, max_tokens=220)
+        summary = _call_llm_chat(messages_llm, temperature=0.1, max_tokens=220, model_id=model_id)
         return (summary or "").strip()
     except Exception as e:
         logger.warning(f"Thread summarization failed: {e}")
         return ""
 
 
-def _check_clarification_needed(question: str, history_messages: List[Dict], kb_context: Optional[str] = None) -> Dict[str, Any]:
+def _check_clarification_needed(
+    question: str, 
+    history_messages: List[Dict], 
+    kb_context: Optional[str] = None,
+    model_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Определяет нужны ли уточнения для ответа на вопрос.
     
@@ -362,6 +442,8 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
     Args:
         question: Вопрос пользователя
         history_messages: История диалога
+        kb_context: Контекст из базы знаний
+        model_id: ID модели для использования
     
     Returns:
         Dict с полями:
@@ -435,7 +517,7 @@ def _check_clarification_needed(question: str, history_messages: List[Dict], kb_
         }
     ]
     
-    response = _call_llm_chat(messages, temperature=0.1, max_tokens=1000)
+    response = _call_llm_chat(messages, temperature=0.1, max_tokens=1000, model_id=model_id)
     try:
         logger.info(f"🤖 LLM raw clarification response: {response}")
     except Exception:
@@ -549,6 +631,7 @@ class ConversationalRequest(BaseModel):
     rerank_top_k: Optional[int] = None
     skip_condensation: bool = False  # Пропустить переформулировку вопроса
     skip_clarification_check: bool = False  # Пропустить проверку на уточнения
+    model_id: Optional[str] = None  # ID модели для использования (по умолчанию DEFAULT_MODEL_ID)
 
 
 class ConversationalResponse(BaseModel):
@@ -1253,7 +1336,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     # Подготовим вопрос для проверки (учитывая историю диалога), чтобы не делать двойную переформулировку
     query_for_check = req.query
     if not req.skip_clarification_check and not req.skip_condensation:
-        query_for_check = _condense_question_with_history(req.query, history_messages, aux_summaries)
+        query_for_check = _condense_question_with_history(req.query, history_messages, aux_summaries, model_id=req.model_id)
 
     # ===== ШАГ 1: Проверка на необходимость уточнений =====
     # Посчитаем текущий раунд уточнений по ветке
@@ -1294,7 +1377,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
             kb_context = ""
         kb_time = time.time() - kb_search_start
         clarification_start = time.time()
-        clarification_result = _check_clarification_needed(query_for_check, history_messages, kb_context)
+        clarification_result = _check_clarification_needed(query_for_check, history_messages, kb_context, model_id=req.model_id)
         clarification_time = time.time() - clarification_start
         
         metadata["steps"]["clarification_check"] = {
@@ -1346,7 +1429,7 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     already_condensed = (query_for_search != req.query)
     if not req.skip_condensation and not already_condensed:
         condensation_start = time.time()
-        query_for_search = _condense_question_with_history(req.query, history_messages, aux_summaries)
+        query_for_search = _condense_question_with_history(req.query, history_messages, aux_summaries, model_id=req.model_id)
         condensation_time = time.time() - condensation_start
         
         metadata["steps"]["query_condensation"] = {
@@ -1565,14 +1648,14 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
     ]
     
     # Вызываем LLM
-    answer = _call_llm_chat(messages, temperature=0.2, max_tokens=2000)
+    answer = _call_llm_chat(messages, temperature=0.2, max_tokens=2000, model_id=req.model_id)
     generation_time = time.time() - generation_start
     
     await session.add_message("assistant", answer, metadata={"stage": "rag_answer", "thread_id": thread_id})
     # Сохраняем суммаризацию для текущей ветки
     try:
         thread_msgs = await session.get_thread_messages(thread_id)
-        thread_summary = _summarize_thread(thread_msgs, answer)
+        thread_summary = _summarize_thread(thread_msgs, answer, model_id=req.model_id)
         if thread_summary:
             await session.save_thread_summary(thread_id, thread_summary)
             metadata["steps"]["thread_summary"] = {"saved": True, "length": len(thread_summary)}
@@ -1582,9 +1665,14 @@ async def conversational_rag_endpoint(req: ConversationalRequest, pretty: bool =
         logger.warning(f"Failed to save thread summary (thread={thread_id}): {e}")
         metadata["steps"]["thread_summary"] = {"saved": False, "error": str(e)}
     
+    # Получаем имя модели для метаданных
+    actual_model_id = req.model_id if req.model_id and req.model_id in LLM_MODELS else DEFAULT_MODEL_ID
+    model_name = LLM_MODELS[actual_model_id]["name"]
+    
     metadata["steps"]["generation"] = {
-        "model": LLM_MODEL,
-        "max_tokens": 1000,
+        "model": actual_model_id,
+        "model_name": model_name,
+        "max_tokens": 2000,
         "temperature": 0.2,
         "context_length": len(context),
         "history_messages_used": len(history_for_prompt),
@@ -1849,3 +1937,29 @@ async def serve_ui():
             "Please ensure static/index.html exists in the services/online-rag directory.",
             status_code=404
         )
+
+
+@app.get("/models")
+async def get_available_models():
+    """
+    Возвращает список доступных LLM моделей для выбора в UI.
+    
+    Returns:
+        List[Dict]: Список моделей с их конфигурациями
+    """
+    models_list = []
+    for model_id, config in LLM_MODELS.items():
+        models_list.append({
+            "id": model_id,
+            "name": config["name"],
+            "size": config["size"],
+            "emoji": config["emoji"],
+            "description": config["description"],
+            "speed": config["speed"],
+            "quality": config["quality"]
+        })
+    
+    return {
+        "models": models_list,
+        "default_model_id": DEFAULT_MODEL_ID
+    }

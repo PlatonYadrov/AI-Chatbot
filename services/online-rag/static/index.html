@@ -179,6 +179,14 @@
         <div class="muted">По умолчанию используется <b>id текущего диалога</b>. Переключая диалоги, вы автоматически получаете новое <code>session_name</code>.</div>
       </div>
 
+      <div class="field">
+        <label>🤖 LLM Модель</label>
+        <select id="modelSelect" style="background:#0b131d;border:1px solid #233244;border-radius:10px;padding:10px;color:var(--text);font:inherit;">
+          <option value="">Загрузка моделей...</option>
+        </select>
+        <div class="muted">Выбор локальной LLM модели для генерации ответов</div>
+      </div>
+
       <div class="row" style="gap:12px;flex-wrap:wrap;margin:14px 0 6px">
         <div class="field" style="min-width:160px">
           <label>k</label>
@@ -264,6 +272,7 @@
     const useRerankingInput = byId('useReranking');
     const skipCondensationInput = byId('skipCondensation');
     const skipClarificationCheckInput = byId('skipClarificationCheck');
+    const modelSelectInput = byId('modelSelect');
     const saveSettingsBtn = byId('saveSettingsBtn');
 
     // === Вспомогательные ===
@@ -425,6 +434,7 @@
           rerank_top_k: Number(settings.rerankTopK ?? 0),
           skip_condensation: Boolean(settings.skipCondensation ?? false),
           skip_clarification_check: Boolean(settings.skipClarificationCheck ?? false),
+          model_id: settings.modelId || null,
         };
 
         const url = new URL(endpoint);
@@ -558,6 +568,7 @@
       useRerankingInput.checked = (settings.useReranking ?? true);
       skipCondensationInput.checked = (settings.skipCondensation ?? false);
       skipClarificationCheckInput.checked = (settings.skipClarificationCheck ?? false);
+      if (settings.modelId && modelSelectInput) modelSelectInput.value = settings.modelId;
       endpointError.classList.add('hidden');
       settingsDlg.showModal();
     });
@@ -582,6 +593,7 @@
         useReranking: useRerankingInput.checked,
         skipCondensation: skipCondensationInput.checked,
         skipClarificationCheck: skipClarificationCheckInput.checked,
+        modelId: modelSelectInput.value || null,
       };
       saveSettings(settings);
       updateEndpointUI();
@@ -590,9 +602,56 @@
       render();
     });
 
+    // === Загрузка моделей ===
+    async function loadModels() {
+      if (!endpointReady()) return;
+      
+      try {
+        const endpointBase = settings.endpoint.replace('/chat/conversational', '');
+        const modelsUrl = `${endpointBase}/models`;
+        
+        const res = await fetch(modelsUrl);
+        if (!res.ok) {
+          console.warn('Failed to load models:', res.status);
+          return;
+        }
+        
+        const data = await res.json();
+        const models = data.models || [];
+        const defaultModelId = data.default_model_id;
+        
+        // Очищаем и заполняем select
+        modelSelectInput.innerHTML = '';
+        
+        models.forEach(model => {
+          const option = document.createElement('option');
+          option.value = model.id;
+          option.textContent = `${model.emoji} ${model.name} (${model.size}) — ${model.description}`;
+          modelSelectInput.appendChild(option);
+        });
+        
+        // Устанавливаем выбранную модель или default
+        if (settings.modelId) {
+          modelSelectInput.value = settings.modelId;
+        } else if (defaultModelId) {
+          modelSelectInput.value = defaultModelId;
+          settings.modelId = defaultModelId;
+          saveSettings(settings);
+        }
+        
+        console.log(`✅ Loaded ${models.length} LLM models`);
+      } catch (err) {
+        console.error('Failed to load models:', err);
+        modelSelectInput.innerHTML = '<option value="">Не удалось загрузить модели</option>';
+      }
+    }
+
     // === Инициализация ===
     if(!activeId) newChat();
     render();
+    
+    // Загружаем модели при старте
+    loadModels();
   </script>
 </body>
 </html>
